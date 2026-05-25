@@ -63,7 +63,7 @@ def analyze_broker_row(broker_id: str, grp: pd.DataFrame, symbol_activity: float
         + min(20, lp / (activity + 1e-9) * 100 * 0.2)
         - min(15, m["two_side_pct"] * 0.15)
     )
-    if m["bias"] == "acc_buy":
+    if m["bias"] in ("acc_buy", "absorption", "dist_absorption"):
         conviction += 8
     elif m["bias"] == "dist_heavy":
         conviction = max(0, conviction - 5)

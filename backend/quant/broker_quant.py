@@ -13,13 +13,13 @@ def analyze_brokers(sym: str, row: pd.Series, broker_panel: pd.DataFrame) -> dic
 
     if bp >= 22:
         score += 25
-        notes.append(f"Strong 1D–1W broker skew ({bp:.0f}/100)")
+        notes.append(f"Strong buy absorption / desk skew ({bp:.0f}/100)")
     elif bp >= 15:
         score += 12
-        notes.append(f"Moderate broker pressure ({bp:.0f})")
+        notes.append(f"Moderate absorption pressure ({bp:.0f})")
     else:
         score -= 5
-        notes.append(f"Weak broker skew ({bp:.0f})")
+        notes.append(f"Low absorption on distribution sheet ({bp:.0f}) — check 1W horizon")
 
     if desk.get("top_broker_ids"):
         notes.append(f"Watch brokers active: {desk['top_broker_ids']}")

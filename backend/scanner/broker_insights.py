@@ -18,7 +18,7 @@ def _horizon_sort(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def broker_pressure_score(sym_panel: pd.DataFrame) -> float:
-    """0–100: short-horizon buy vs sell qty + heavy-broker skew (distribution panel)."""
+    """0–100: absorption on distribution sheets; OFI on accumulation."""
     if sym_panel.empty:
         return 0.0
     sub = sym_panel[sym_panel["horizon"].isin(SHORT_HORIZONS)] if "horizon" in sym_panel.columns else sym_panel
@@ -29,11 +29,21 @@ def broker_pressure_score(sym_panel: pd.DataFrame) -> float:
     total = buy + sell
     if total <= 0:
         return 0.0
-    ofi = (buy - sell) / total
+    buy_share = buy / total
     heavy = float(pd.to_numeric(sub.get("heavy_broker_count", 0), errors="coerce").fillna(0).sum())
     brokers = float(pd.to_numeric(sub.get("broker_count", 0), errors="coerce").fillna(0).sum())
     heavy_skew = min(heavy / max(brokers, 1), 1.0)
-    raw = (ofi + 1) / 2 * 70 + heavy_skew * 30
+
+    dist_only = (
+        "side" in sub.columns
+        and sub["side"].astype(str).str.lower().eq("distribution").all()
+        and not sub["side"].astype(str).str.lower().eq("accumulation").any()
+    )
+    if dist_only:
+        raw = buy_share * 75 + heavy_skew * 25
+    else:
+        ofi = (buy - sell) / total
+        raw = (ofi + 1) / 2 * 70 + heavy_skew * 30
     return float(np.clip(raw, 0, 100))
 
 

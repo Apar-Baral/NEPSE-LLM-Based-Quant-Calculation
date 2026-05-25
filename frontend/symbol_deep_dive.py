@@ -269,13 +269,33 @@ def render_symbol_deep_dive(
         if broker_panel.empty:
             st.info("Run pipeline for broker-level data.")
         else:
-            st.info(
-                "**Distribution floorsheet:** high `sell_qty` is normal (brokers distributing stock). "
-                "**Bias** uses buy-share & accumulation — not raw net_qty sign. Upload **Accumulation** for true acc_buy desks."
+            from backend.scanner.broker_flow import symbol_absorption_summary
+
+            abs_sum = symbol_absorption_summary(sym, broker_panel)
+            if abs_sum:
+                hcols = st.columns(4)
+                hcols[0].metric("1D Buy qty", f"{abs_sum['buy_qty']:,.0f}")
+                hcols[1].metric("1D Sell qty (supply)", f"{abs_sum['sell_qty']:,.0f}")
+                hcols[2].metric("Absorption %", f"{abs_sum['absorption_pct']:.1f}%")
+                hcols[3].metric("Flow read", abs_sum.get("verdict", "—")[:24])
+                st.caption(abs_sum.get("note", ""))
+                by_h = abs_sum.get("by_horizon") or {}
+                if len(by_h) > 1:
+                    st.markdown(
+                        "**Absorption by horizon:** "
+                        + " · ".join(f"{h} {v['absorption_pct']:.0f}% ({v['bias']})" for h, v in by_h.items())
+                    )
+
+            br_horizon = st.selectbox(
+                "Broker breakdown horizon",
+                ("1D", "2D", "1W", "1M", "3M"),
+                index=2,
+                help="1W/1M often show higher absorption on rallying names than 1D alone.",
+                key=f"broker_hz_{sym}",
             )
-            top10_ids = discover_top_brokers(broker_panel, top_n=10)
-            st.caption(f"**Top 10 brokers** (market 1D activity): {', '.join(top10_ids)}")
-            btable = symbol_top_brokers_table(sym, broker_panel, top_n=10)
+            top10_ids = discover_top_brokers(broker_panel, horizon=br_horizon, top_n=10)
+            st.caption(f"**Top 10 brokers** ({br_horizon} activity): {', '.join(top10_ids)}")
+            btable = symbol_top_brokers_table(sym, broker_panel, horizon=br_horizon, top_n=10)
             if not btable.empty:
                 show_cols = [
                     c
@@ -290,7 +310,10 @@ def render_symbol_deep_dive(
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "bias": st.column_config.TextColumn("Bias", help="acc_buy / absorption / dist_heavy / two_sided"),
+                        "bias": st.column_config.TextColumn(
+                            "Bias",
+                            help="dist_absorption = buyers absorbing supply · dist_heavy = weak absorption only",
+                        ),
                         "buy_share_pct": st.column_config.NumberColumn("Buy %", format="%.1f"),
                         "flow_label": st.column_config.TextColumn("Meaning"),
                     },
