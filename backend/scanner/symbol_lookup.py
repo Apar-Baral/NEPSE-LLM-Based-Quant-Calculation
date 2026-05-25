@@ -13,7 +13,21 @@ from backend.scanner.volume_universe import (
 )
 from backend.signals.effective_scores import effective_scores
 from backend.signals.universe_tiers import assign_universe_tiers
+from backend.scanner.symbol_metrics import overlay_panel_horizons, recompute_composite_scores
 from backend.utils.numeric import coerce_numeric
+
+FEATURE_PRIORITY = (
+    "floorsheet_momentum_score",
+    "early_momentum_score",
+    "distribution_risk_score",
+    "smart_money_score",
+    "ofi",
+    "mtf_convergence",
+    "acc_dist_ratio",
+    "p_long_momentum",
+    "expected_return_10d",
+    "confidence",
+)
 
 
 def all_tracked_symbols(
@@ -45,18 +59,7 @@ def _merge_feature_row(row: pd.DataFrame, features: pd.DataFrame | None, sym: st
         val = fr[col]
         if col not in row.columns or pd.isna(row[col].iloc[0]) or row[col].iloc[0] in (0, None, ""):
             row[col] = val
-        elif col in (
-            "early_momentum_score",
-            "floorsheet_momentum_score",
-            "distribution_risk_score",
-            "smart_money_score",
-            "ltp",
-            "tech_demand_zone",
-            "tech_supply_zone",
-            "ofi",
-            "mtf_convergence",
-            "acc_dist_ratio",
-        ):
+        elif col in FEATURE_PRIORITY or col.startswith("acc_") or col.startswith("dist_"):
             row[col] = val
     return row
 
@@ -93,12 +96,8 @@ def enrich_symbol_row(
 
     row = row.tail(1).copy()
     row = _merge_feature_row(row, features, sym)
-    # Recompute floorsheet EMS from merged feature columns when still zero
-    fr = features[features["symbol"].astype(str).str.upper() == sym].tail(1) if features is not None and not features.empty else pd.DataFrame()
-    if not fr.empty and "floorsheet_momentum_score" in fr.columns:
-        row["floorsheet_momentum_score"] = fr["floorsheet_momentum_score"].values[0]
-    if not fr.empty and "distribution_risk_score" in fr.columns:
-        row["distribution_risk_score"] = fr["distribution_risk_score"].values[0]
+    row = overlay_panel_horizons(row, panel, sym)
+    row = recompute_composite_scores(row)
     row = attach_volume_from_panel(row, panel)
     row = attach_ltp_from_panel(row, panel, broker_panel)
     row = attach_broker_metrics(row, panel)

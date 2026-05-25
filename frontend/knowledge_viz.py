@@ -179,6 +179,41 @@ def build_comprehensive_figure(sub: dict, title: str, filter_kinds: list[str] | 
     return fig
 
 
+def _render_conclusion_panel(sym: str, sub: dict) -> None:
+    """Fleet + quant synthesized verdict shown above the graph."""
+    concl = sub.get("conclusion") or {}
+    if not concl:
+        st.info(
+            f"No stored conclusion for **{sym}** yet. Click **Rebuild comprehensive graph** to run "
+            "162 agents and generate the summary verdict."
+        )
+        return
+
+    st.markdown("### Conclusion (quant + agents + LLM rules)")
+    st.markdown(concl.get("summary", ""))
+    st.markdown(f"**Recommended action:** {concl.get('action', '—')}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    dom_s = concl.get("domain_signals") or {}
+    dom_sc = concl.get("domain_scores") or {}
+    c1.metric("Quant desk", f"{dom_sc.get('quant', 0):.0f}", dom_s.get("quant", "—"))
+    c2.metric("Financial", f"{dom_sc.get('financial', 0):.0f}", dom_s.get("financial", "—"))
+    c3.metric("Broker", f"{dom_sc.get('broker', 0):.0f}", dom_s.get("broker", "—"))
+    c4.metric("LLM rules", f"{dom_sc.get('llm', 0):.0f}", dom_s.get("llm", "—"))
+
+    col_d, col_r = st.columns(2)
+    with col_d:
+        st.markdown("**Key drivers**")
+        for d in concl.get("drivers") or []:
+            st.markdown(f"- {d}")
+    with col_r:
+        st.markdown("**Risks**")
+        for r in concl.get("risks") or []:
+            st.markdown(f"- {r}")
+    if concl.get("quant_verdict"):
+        st.caption(f"Quant pipeline verdict: *{concl['quant_verdict']}* · Tier: **{concl.get('tier', '—')}**")
+
+
 def render_node_inspector(sub: dict) -> None:
     nodes = sub.get("nodes", [])
     if not nodes:
@@ -199,6 +234,9 @@ def _render_kg_guide() -> None:
     with st.expander("What this graph means (findings & how to act)", expanded=False):
         st.markdown(
             """
+**One symbol only (not other stocks)**  
+The graph should show **only the symbol you selected** (e.g. NGPL). If you see BUNGAL or AKJCL, that was a **bug**: old shared agent nodes linked multiple tickers. Click **Rebuild comprehensive graph** for your symbol to refresh. After the fix, agents are stored as `agent:name:SYMBOL` so other stocks cannot appear.
+
 **What you are looking at**  
 A single-stock **map of evidence**: quant math, broker desks, financial risk, and LLM-style rules, all linked to one ticker.
 
@@ -320,6 +358,10 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
                 )
                 progress.progress(1.0, text="Done")
                 status.empty()
+                from backend.knowledge.comprehensive_graph import build_graph_conclusion
+
+                concl = build_graph_conclusion(sym, row_df.iloc[0], report, report.quant_pipeline)
+                st.session_state[f"kg_conclusion_{sym}"] = concl
                 st.success(f"Graph built: **{report.agent_count}** agents · composite **{report.composite_score:.0f}/100**")
                 st.balloons()
                 st.rerun()
@@ -334,11 +376,28 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
         sub = subgraph_for_symbol(sym, depth=depth)
     else:
         sub = {"nodes": [], "edges": []}
-    st.caption(
-        f"**{sym}** subgraph: {len(sub.get('nodes', []))} nodes · {len(sub.get('edges', []))} edges (depth {depth}). "
-        "Broker nodes = desks with **actual trades on this symbol** (not market-wide top-10 padding). "
-        "Click **Rebuild** after changing symbol."
+    other_symbols = sorted(
+        {
+            n.get("label", n["id"].split(":")[-1])
+            for n in sub.get("nodes", [])
+            if n.get("kind") == "symbol" and n["id"] != f"symbol:{sym}"
+        }
     )
+    if other_symbols:
+        st.warning(
+            f"Stale graph data still lists other tickers: **{', '.join(other_symbols[:6])}**. "
+            f"Click **Rebuild comprehensive graph** for **{sym}** only."
+        )
+
+    st.caption(
+        f"**{sym} only** — {len(sub.get('nodes', []))} nodes · {len(sub.get('edges', []))} edges (depth {depth}). "
+        "Rebuild after changing symbol."
+    )
+
+    if sub.get("conclusion"):
+        _render_conclusion_panel(sym, sub)
+    elif st.session_state.get(f"kg_conclusion_{sym}"):
+        _render_conclusion_panel(sym, {"conclusion": st.session_state[f"kg_conclusion_{sym}"]})
 
     fig = build_comprehensive_figure(sub, f"{sym} — quant · financial · broker · LLM", filter_kinds=filter_dom or None)
     if fig:

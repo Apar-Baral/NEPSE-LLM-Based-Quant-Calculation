@@ -24,7 +24,7 @@ def run_quant_analysis(
         analyze_volume(row, universe),
         analyze_brokers(sym, row, broker_panel),
         detect_fair_value_gaps(row, panel_sym),
-        analyze_momentum(row),
+        analyze_momentum(row, universe),
     ]
 
     if run_llm:
@@ -32,10 +32,27 @@ def run_quant_analysis(
 
     weights = [0.22, 0.22, 0.22, 0.24, 0.10] if run_llm else [0.25, 0.25, 0.25, 0.25]
     composite = sum(s["score"] * w for s, w in zip(steps, weights[: len(steps)]))
+
+    turn = float(row.get("daily_turnover_lac") or 0)
+    rank = float(row.get("early_rank_score") or 0)
+    tier = str(row.get("signal_tier", "Neutral"))
+    fs = float(row.get("floorsheet_momentum_score") or 0)
+    if turn >= 400 and rank >= 0.10:
+        composite = min(100, composite + 8)
+    elif turn >= 150 and tier in ("Trigger", "Confirmed"):
+        composite = min(100, composite + 6)
+    if fs >= 60 and tier in ("Setup", "Trigger", "Confirmed"):
+        composite = min(100, composite + 4)
+
     passes = sum(1 for s in steps if s.get("pass"))
-    verdict = "Strong long bias" if composite >= 68 and passes >= 3 else (
-        "Caution — mixed signals" if composite >= 48 else "Weak / avoid long"
-    )
+    if composite >= 72 and passes >= 3 and tier in ("Trigger", "Confirmed"):
+        verdict = "Strong long bias"
+    elif composite >= 58 and (tier in ("Trigger", "Confirmed", "Setup") or turn >= 200):
+        verdict = "Positive — early momentum candidate"
+    elif composite >= 45:
+        verdict = "Caution — mixed signals"
+    else:
+        verdict = "Weak / avoid long"
 
     return {
         "symbol": sym,

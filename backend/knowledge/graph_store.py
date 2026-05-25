@@ -140,6 +140,8 @@ class LogicGraphStore:
             meta = n.get("meta") or {}
             if meta.get("symbol") == sym or f":{sym}" in nid or nid.endswith(f":{sym}"):
                 remove.add(nid)
+            if n.get("kind") == "agent" and nid.startswith("agent:") and nid.count(":") == 1:
+                remove.add(nid)
 
         before = len(self.nodes)
         self.nodes = [n for n in self.nodes if n["id"] not in remove]

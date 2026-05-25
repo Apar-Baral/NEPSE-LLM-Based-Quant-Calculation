@@ -517,20 +517,11 @@ elif page == "Model Lab":
         if result.get("status") == "ok":
             st.success("Training complete. Run **Run Pipeline** to blend predictions.")
 
-    attn_df = attention_dataframe()
-    if not attn_df.empty:
-        st.subheader("Temporal attention (why this horizon mattered)")
-        fig_attn = px.bar(
-            attn_df,
-            x="horizon",
-            y="temporal_weight",
-            color="symbol",
-            barmode="group",
-            title="Learned horizon importance by symbol",
-        )
-        st.plotly_chart(fig_attn, use_container_width=True)
-    else:
-        st.info("Run pipeline after training to generate attention weights.")
+    from frontend.model_lab_viz import render_model_lab_charts
+
+    st.subheader("Temporal attention — which floorsheet horizon drives the score")
+    dive_sym = st.session_state.get("dive_select", "")
+    render_model_lab_charts(attention_dataframe(), focus_sym=dive_sym or None)
 
 elif page == "Symbol Deep Dive":
     hero(
@@ -557,7 +548,7 @@ elif page == "Symbol Deep Dive":
             if not preds.empty
             else pd.DataFrame()
         )
-        render_symbol_deep_dive(sym, preds, features, panel, broker_panel, universe_df=universe_dive)
+        render_symbol_deep_dive(sym, preds, features, raw_panel, broker_panel, universe_df=universe_dive)
 
 elif page == "Daily Upload":
     from backend.ingest.data_inventory import data_folder_inventory, panel_side_summary

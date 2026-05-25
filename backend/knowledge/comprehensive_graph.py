@@ -76,13 +76,14 @@ def build_comprehensive_knowledge(
         agents = [a for a in fleet_report.agents if a.domain == dom and a.status == "ok"]
         agents.sort(key=lambda a: a.score, reverse=True)
         for a in agents[:12]:
-            aid = g._nid("agent", a.agent_id)
+            aid = g._nid("agent", f"{a.agent_id}:{sym}")
             g._upsert_node(
                 aid,
                 "agent",
                 a.name[:40],
                 {
                     "agent_id": a.agent_id,
+                    "symbol": sym,
                     "score": a.score,
                     "signal": a.signal,
                     "summary": a.summary,
@@ -215,9 +216,114 @@ def build_comprehensive_knowledge(
                 rationale=str(link.get("rationale", ""))[:200],
             )
 
+    _drop_legacy_global_nodes(g)
+    conclusion = build_graph_conclusion(sym, row, fleet_report, quant_pipeline)
+    sym_node = next((n for n in g.nodes if n["id"] == sid), None)
+    if sym_node:
+        sym_node.setdefault("meta", {}).update(conclusion)
+
     g.save()
     _index_comprehensive_vectors(sym, row, fleet_report, quant_pipeline)
     return g
+
+
+def _drop_legacy_global_nodes(g: LogicGraphStore) -> None:
+    """Remove old shared agent:* nodes that linked multiple tickers together."""
+    legacy = {
+        n["id"]
+        for n in g.nodes
+        if n.get("kind") == "agent" and n["id"].startswith("agent:") and n["id"].count(":") == 1
+    }
+    if not legacy:
+        return
+    g.nodes = [n for n in g.nodes if n["id"] not in legacy]
+    g.edges = [e for e in g.edges if e["source"] not in legacy and e["target"] not in legacy]
+
+
+def _node_belongs_to_symbol(n: dict, sym: str) -> bool:
+    sym = sym.upper()
+    nid = n.get("id", "")
+    if n.get("kind") == "symbol":
+        return nid == f"symbol:{sym}"
+    meta = n.get("meta") or {}
+    if meta.get("symbol") == sym:
+        return True
+    if f":{sym}" in nid:
+        return True
+    if n.get("kind") == "agent":
+        return nid.endswith(f":{sym}")
+    return False
+
+
+def build_graph_conclusion(
+    sym: str,
+    row: pd.Series,
+    fleet_report: "FleetReport",
+    quant_pipeline: dict | None = None,
+) -> dict:
+    """Single readable verdict from quant + 162 agents + scanner tier."""
+    sym = sym.upper()
+    tier = str(row.get("signal_tier", "Neutral"))
+    dom = fleet_report.domain_signals
+    scores = fleet_report.domain_scores
+    bulls = sum(1 for a in fleet_report.agents if a.status == "ok" and a.signal == "bullish")
+    bears = sum(1 for a in fleet_report.agents if a.status == "ok" and a.signal == "bearish")
+    ok_n = sum(1 for a in fleet_report.agents if a.status == "ok")
+
+    quant_verdict = (quant_pipeline or {}).get("verdict", "—")
+    quant_pass = (quant_pipeline or {}).get("steps_passed", 0)
+    quant_total = (quant_pipeline or {}).get("steps_total", 4)
+
+    action = "HOLD / WATCH"
+    if tier in ("Trigger", "Confirmed") and fleet_report.composite_score >= 55 and dom.get("broker") != "bearish":
+        action = "ADD / ACCUMULATE (with confirmation)"
+    elif tier == "Invalidated" or dom.get("financial") == "bearish" or float(row.get("distribution_risk_score") or 0) >= 85:
+        action = "AVOID NEW LONGS / REDUCE"
+    elif tier == "Setup" and fleet_report.composite_score >= 48:
+        action = "HOLD — early setup, wait for tier upgrade"
+    elif bears > bulls * 1.3:
+        action = "CAUTION — more agents bearish than bullish"
+
+    drivers: list[str] = []
+    risks: list[str] = []
+    if float(row.get("daily_turnover_lac") or 0) > 50:
+        drivers.append(f"1D turnover **{float(row['daily_turnover_lac']):.0f} Lac** (liquid)")
+    if float(row.get("early_momentum_score") or 0) >= 40:
+        drivers.append(f"Early momentum **{float(row['early_momentum_score']):.0f}**")
+    if float(row.get("broker_pressure") or 0) >= 25:
+        drivers.append(f"Broker pressure **{float(row['broker_pressure']):.0f}**")
+    if dom.get("quant") == "bullish":
+        drivers.append("Quant desk **bullish**")
+    if dom.get("broker") == "bullish":
+        drivers.append("Broker desk **bullish**")
+    if float(row.get("distribution_risk_score") or 0) >= 70:
+        risks.append(f"Distribution risk **{float(row['distribution_risk_score']):.0f}**")
+    if float(row.get("circular_risk") or 0) >= 70:
+        risks.append(f"Circular risk **{float(row['circular_risk']):.0f}**")
+    if bears >= 5:
+        risks.append(f"**{bears}** bearish agent votes vs **{bulls}** bullish")
+    if quant_pass < 2:
+        risks.append(f"Quant pipeline only **{quant_pass}/{quant_total}** steps passed")
+
+    summary = (
+        f"**{sym}** — Fleet composite **{fleet_report.composite_score:.0f}/100** · "
+        f"Long consensus **{fleet_report.consensus_long_pct:.0f}%** ({bulls}/{ok_n} bullish agents). "
+        f"Scanner tier **{tier}** · Quant: *{quant_verdict}*."
+    )
+
+    return {
+        "symbol": sym,
+        "action": action,
+        "summary": summary,
+        "drivers": drivers or ["No strong positive drivers flagged"],
+        "risks": risks or ["No major risk flags"],
+        "domain_scores": scores,
+        "domain_signals": dom,
+        "tier": tier,
+        "quant_verdict": quant_verdict,
+        "composite_score": fleet_report.composite_score,
+        "consensus_long_pct": fleet_report.consensus_long_pct,
+    }
 
 
 def _index_comprehensive_vectors(sym: str, row: pd.Series, fleet: "FleetReport", quant: dict | None) -> None:
@@ -325,7 +431,19 @@ def subgraph_for_symbol(sym: str, depth: int = 2) -> dict:
             return False
         return True
 
-    nodes = [n for n in g.nodes if _keep_node(n)]
+    nodes = [n for n in g.nodes if _keep_node(n) and _node_belongs_to_symbol(n, sym)]
     nids = {n["id"] for n in nodes}
     edges = [e for e in all_edges if e["source"] in nids and e["target"] in nids]
-    return {"nodes": nodes, "edges": edges, "symbol": sym, "depth": depth}
+    sym_node = next((n for n in nodes if n["id"] == sid), None)
+    conclusion = {}
+    if sym_node and sym_node.get("meta"):
+        m = sym_node["meta"]
+        conclusion = {
+            k: m[k]
+            for k in (
+                "action", "summary", "drivers", "risks", "domain_scores",
+                "domain_signals", "tier", "quant_verdict", "composite_score", "consensus_long_pct",
+            )
+            if k in m
+        }
+    return {"nodes": nodes, "edges": edges, "symbol": sym, "depth": depth, "conclusion": conclusion}

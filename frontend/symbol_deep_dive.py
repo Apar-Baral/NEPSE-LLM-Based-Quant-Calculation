@@ -246,20 +246,26 @@ def render_symbol_deep_dive(
     c1.metric("Verdict", quant["verdict"][:28] + ("…" if len(quant["verdict"]) > 28 else ""))
     c2.metric("Steps passed", f"{quant['steps_passed']}/{quant['steps_total']}")
 
-    fs = float(row.get("floorsheet_momentum_score") or 0)
-    ems_raw = float(row.get("early_momentum_score") or 0)
-    from backend.ingest.data_inventory import data_folder_inventory
+    fs = float(pd.to_numeric(row.get("floorsheet_momentum_score"), errors="coerce") or 0)
+    ems_raw = float(pd.to_numeric(row.get("early_momentum_score"), errors="coerce") or 0)
+    from backend.ingest.data_inventory import data_folder_inventory, panel_side_summary
 
     inv = data_folder_inventory()
+    ps = panel_side_summary(panel)
     if inv.get("uses_all_in_one") and inv.get("has_true_accumulation"):
-        st.caption("Data: **All in one Data** (accumulation + distribution loaded).")
-    elif fs <= 0 or ems_raw <= 0:
-        st.warning(
-            f"Limited floorsheet depth — {inv.get('message', '')} "
-            "Add CSVs under `Data/All in one Data/` and run pipeline."
+        st.caption(
+            f"Data: **All in one Data** ({inv.get('all_in_one_file_count', 0)} files) · "
+            f"panel {ps.get('accumulation_rows', 0)} acc / {ps.get('distribution_rows', 0)} dist rows"
         )
-    elif fs > 0 and not inv.get("has_true_accumulation"):
-        st.caption("Floorsheet scores use distribution-proxy until accumulation files are loaded.")
+    elif ps.get("accumulation_rows", 0) > 0:
+        st.caption(f"Floorsheet panel has **{ps['accumulation_rows']}** accumulation rows loaded.")
+    elif inv.get("uses_all_in_one"):
+        st.warning(inv.get("message", "Add accumulation files to All in one Data."))
+    elif fs <= 0 and ems_raw <= 0:
+        st.warning(
+            "Limited metrics for this symbol — click **Run Pipeline** in the sidebar after adding CSVs to "
+            "`Data/All in one Data/`."
+        )
 
     tab_q, tab_t, tab_v, tab_c, tab_b, tab_l = st.tabs(
         ["Algorithms", "Early momentum trace", "Volume chart", "Floorsheet ladder", "Brokers", "LLM advisor"]
