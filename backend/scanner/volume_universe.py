@@ -146,7 +146,7 @@ def get_latest_scanner_universe(
     out = select_high_volume_universe(day, top_n=top_n)
     if not out.empty:
         from backend.scanner.llm_scorer import score_universe_with_llm
-        from backend.signals import assign_universe_tiers
+        from backend.signals.universe_tiers import assign_universe_tiers
 
         out = score_universe_with_llm(out, p, fetch_new=False)
         out["early_rank_score"] = compute_early_rank_score(out)

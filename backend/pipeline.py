@@ -18,7 +18,8 @@ from backend.ingest.ohlcv_loader import build_ltp_proxy_from_panel, load_ohlcv_c
 from backend.llm.rag import SimpleRAG
 from backend.models.labels import build_labels
 from backend.models.trainer import predict, train_models
-from backend.signals import apply_momentum_rules, assign_universe_tiers
+from backend.signals.momentum_rules import apply_momentum_rules
+from backend.signals.universe_tiers import assign_universe_tiers
 
 
 def run_pipeline(

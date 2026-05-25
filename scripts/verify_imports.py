@@ -23,7 +23,7 @@ except Exception as e:
     print("backend.scanner import: FAILED", e)
 
 try:
-    from backend.signals import assign_universe_tiers
+    from backend.signals.universe_tiers import assign_universe_tiers
     print("assign_universe_tiers import: OK")
 except Exception as e:
     print("assign_universe_tiers import: FAILED", e)

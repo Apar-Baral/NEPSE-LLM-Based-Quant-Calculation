@@ -110,6 +110,16 @@ if page == "Momentum Scanner":
     else:
         try:
             df = get_latest_scanner_universe(preds, panel=panel, top_n=120)
+        except ImportError as exc:
+            st.error(f"Scanner import error: {exc}")
+            st.code(
+                'cd "E:\\Major Project - Nepse Data LLM"\n'
+                "Remove-Item -Recurse -Force backend\\signals\\__pycache__ -ErrorAction SilentlyContinue\n"
+                "python scripts\\test_scanner.py\n"
+                "streamlit run frontend/streamlit_app.py",
+                language="powershell",
+            )
+            st.stop()
         except Exception as exc:
             st.error(f"Scanner error: {exc}")
             st.stop()
@@ -126,7 +136,7 @@ if page == "Momentum Scanner":
                 from backend.scanner.llm_scorer import score_universe_with_llm
 
                 df = score_universe_with_llm(df, panel, fetch_new=True)
-                from backend.signals import assign_universe_tiers
+                from backend.signals.universe_tiers import assign_universe_tiers
 
                 df["signal_tier"] = assign_universe_tiers(df)
                 if "llm_p_long" in df.columns:
