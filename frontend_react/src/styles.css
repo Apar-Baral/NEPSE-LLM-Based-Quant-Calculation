@@ -1,0 +1,68 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #0f1419;
+  color: #e7ecf1;
+}
+.layout { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 220px;
+  background: #1a2332;
+  padding: 1.5rem 1rem;
+  border-right: 1px solid #2a3544;
+}
+.sidebar h1 { font-size: 1.1rem; margin: 0 0 1.5rem; color: #4ade80; }
+.sidebar nav { display: flex; flex-direction: column; gap: 0.5rem; }
+.sidebar a {
+  color: #94a3b8;
+  text-decoration: none;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+}
+.sidebar a.active, .sidebar a:hover { background: #243044; color: #fff; }
+.main { flex: 1; padding: 1.5rem 2rem; overflow: auto; }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+.metric {
+  background: #1a2332;
+  border: 1px solid #2a3544;
+  border-radius: 8px;
+  padding: 1rem;
+}
+.metric .label { font-size: 0.75rem; color: #94a3b8; }
+.metric .value { font-size: 1.5rem; font-weight: 600; margin-top: 0.25rem; }
+table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid #2a3544; }
+th { color: #94a3b8; font-weight: 500; }
+tr:hover { background: #1a2332; }
+.tier-Trigger, .tier-Confirmed { color: #4ade80; font-weight: 600; }
+.tier-Watch, .tier-Setup { color: #fbbf24; }
+.tier-Invalidated { color: #f87171; }
+.card {
+  background: #1a2332;
+  border: 1px solid #2a3544;
+  border-radius: 8px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+button {
+  background: #4ade80;
+  color: #0f1419;
+  border: none;
+  padding: 0.6rem 1.2rem;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:hover { background: #22c55e; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+textarea, input[type=text] {
+  width: 100%;
+  background: #0f1419;
+  border: 1px solid #2a3544;
+  color: #e7ecf1;
+  padding: 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+.report { white-space: pre-wrap; line-height: 1.6; }

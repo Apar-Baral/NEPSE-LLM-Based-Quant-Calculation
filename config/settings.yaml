@@ -1,0 +1,41 @@
+labels:
+  forward_return_threshold_pct: 5.0
+  max_drawdown_threshold_pct: 3.0
+  forward_windows_days: [3, 5, 10, 20]
+
+signals:
+  watch_zscore: 1.5
+  trigger_probability: 0.60
+  confirmed_probability: 0.65
+  early_momentum_score: 70
+  # Floorsheet-only mode (no accumulation Excel yet)
+  distribution_mode: true
+  dist_trigger_probability: 0.30
+  dist_confirmed_probability: 0.40
+  dist_early_momentum_score: 20
+  dist_broker_pressure_trigger: 18
+  dist_invalidate_drs: 85
+
+ml:
+  test_size_days: 30
+  random_state: 42
+  top_k_scanner: 20
+
+scanner:
+  high_volume_top_n: 120
+  brief_detail_n: 25
+  min_daily_volume: 0
+
+llm:
+  provider: deepseek  # deepseek | openai | ollama
+  base_url: http://localhost:11434
+  model: llama3.1
+  openai_model: gpt-4o-mini
+  deepseek_base_url: https://api.deepseek.com
+  deepseek_model: deepseek-v4-pro  # or deepseek-reasoner, deepseek-v4-flash, deepseek-chat
+  temperature: 0.2
+  max_tokens: 4096
+
+alerts:
+  enabled: false
+  webhook_url: ""

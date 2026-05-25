@@ -1,0 +1,1 @@
+"""NEPSE Quant Platform backend."""

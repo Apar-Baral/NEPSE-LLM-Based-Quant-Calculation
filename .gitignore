@@ -1,0 +1,37 @@
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Data & models (upload locally)
+data/processed/
+data/models/
+data/inbox/
+data/*.db
+data/*.sqlite
+*.parquet
+
+# Legacy sample CSVs (large)
+Data/
+
+# Node
+frontend_react/node_modules/
+frontend_react/dist/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Assets from local screenshots (optional)
+assets/

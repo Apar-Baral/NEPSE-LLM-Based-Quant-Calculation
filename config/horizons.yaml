@@ -1,0 +1,57 @@
+# Map Floorsheet Analytics sheet tabs / CSV suffixes to canonical horizon codes.
+# CSV files (13)-(24) in Distribution Data map to these horizons by suffix order.
+
+horizons:
+  - key: "1D"
+    order: 1
+    aliases: ["Daily", "1 Day", "daily", "1D"]
+    csv_suffix: "13"
+  - key: "2D"
+    order: 2
+    aliases: ["2 Days", "2D"]
+    csv_suffix: "14"
+  - key: "3D"
+    order: 3
+    aliases: ["3 Days", "3D"]
+    csv_suffix: "15"
+  - key: "4D"
+    order: 4
+    aliases: ["4 Days", "4D"]
+    csv_suffix: "16"
+  - key: "1W"
+    order: 5
+    aliases: ["1 Week", "1W"]
+    csv_suffix: "17"
+  - key: "1M"
+    order: 6
+    aliases: ["1 Month", "1M"]
+    csv_suffix: "18"
+  - key: "3M"
+    order: 7
+    aliases: ["3 Months", "3M"]
+    csv_suffix: "19"
+  - key: "6M"
+    order: 8
+    aliases: ["6 Months", "6M"]
+    csv_suffix: "20"
+  - key: "9M"
+    order: 9
+    aliases: ["9 Months", "9M"]
+    csv_suffix: "21"
+  - key: "1Y"
+    order: 10
+    aliases: ["1 Year", "1Y"]
+    csv_suffix: "22"
+  - key: "2Y"
+    order: 11
+    aliases: ["2 Year", "2Y", "2 Years"]
+    csv_suffix: "23"
+  - key: "3Y"
+    order: 12
+    aliases: ["3 Year", "3Y", "3 Years"]
+    csv_suffix: "24"
+
+power_scores:
+  Heavy: 3
+  Medium: 2
+  Light: 1
