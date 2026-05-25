@@ -23,6 +23,12 @@ except Exception as e:
     print("backend.scanner import: FAILED", e)
 
 try:
+    from backend.signals import assign_universe_tiers
+    print("assign_universe_tiers import: OK")
+except Exception as e:
+    print("assign_universe_tiers import: FAILED", e)
+
+try:
     import importlib
     m = importlib.import_module("backend.scanner.volume_universe")
     print("importlib: OK", hasattr(m, "get_latest_scanner_universe"))

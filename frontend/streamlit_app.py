@@ -126,7 +126,7 @@ if page == "Momentum Scanner":
                 from backend.scanner.llm_scorer import score_universe_with_llm
 
                 df = score_universe_with_llm(df, panel, fetch_new=True)
-                from backend.signals.momentum_rules import assign_universe_tiers
+                from backend.signals import assign_universe_tiers
 
                 df["signal_tier"] = assign_universe_tiers(df)
                 if "llm_p_long" in df.columns:
