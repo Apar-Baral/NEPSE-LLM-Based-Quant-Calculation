@@ -26,3 +26,11 @@ def get_signal_config() -> dict[str, Any]:
     if not isinstance(signals, dict):
         signals = {}
     return {**DEFAULT_SIGNALS, **signals}
+
+
+def clear_config_cache() -> None:
+    """Clear cached YAML reads (Streamlit-safe; call at app startup)."""
+    try:
+        load_yaml_config.cache_clear()
+    except Exception:
+        pass

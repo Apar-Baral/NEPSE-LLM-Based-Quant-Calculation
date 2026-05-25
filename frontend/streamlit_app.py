@@ -18,9 +18,13 @@ _STALE_PREFIXES = (
     "backend.llm",
     "backend.quant",
     "backend.signals",
+    "backend.config",
+    "backend.config_signals",
+    "backend.agents",
+    "backend.knowledge",
 )
 for _mod in list(sys.modules):
-    if _mod == "backend.scanner" or any(_mod.startswith(p) for p in _STALE_PREFIXES):
+    if _mod in ("backend.scanner", "backend.config") or any(_mod.startswith(p) for p in _STALE_PREFIXES):
         del sys.modules[_mod]
 
 
@@ -56,7 +60,8 @@ from backend.backtest.engine import (
     merge_ohlcv_sources,
     run_backtest,
 )
-from backend.config import clear_config_cache, ensure_dirs
+from backend.config import ensure_dirs
+from backend.config_signals import clear_config_cache
 
 clear_config_cache()
 import importlib
