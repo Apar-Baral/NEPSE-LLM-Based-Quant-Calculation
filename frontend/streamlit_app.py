@@ -56,7 +56,9 @@ from backend.backtest.engine import (
     merge_ohlcv_sources,
     run_backtest,
 )
-from backend.config import ensure_dirs
+from backend.config import clear_config_cache, ensure_dirs
+
+clear_config_cache()
 import importlib
 
 _analyst = importlib.import_module("backend.llm.analyst")
@@ -278,7 +280,7 @@ if page == "Momentum Scanner":
         st.dataframe(show, use_container_width=True, hide_index=True, height=420)
 
         tab1, tab2, tab3, tab4 = st.tabs(
-            ["Setup map", "Broker desk (58, 49…)", "Circular risk", "Tier breakdown"]
+            ["Setup map", "Broker desk (top 10)", "Circular risk", "Tier breakdown"]
         )
         plot_df = df.copy()
         plot_df["early_rank_pct"] = (_col(plot_df, "early_rank_score") * 100).round(1)
@@ -312,10 +314,11 @@ if page == "Momentum Scanner":
             st.plotly_chart(fig_map, use_container_width=True)
 
         with tab2:
-            from backend.scanner.broker_desk import _watch_brokers, top_broker_market_view
+            from backend.scanner.broker_top10 import discover_top_brokers
+            from backend.scanner.broker_desk import top_broker_market_view
 
-            watch_ids = _watch_brokers()
-            st.markdown(f"**Watch brokers:** {', '.join(watch_ids)} — net flow on **1D** floorsheet")
+            top10 = discover_top_brokers(broker_panel, top_n=10)
+            st.markdown(f"**Top 10 brokers (mathematical rank):** {', '.join(top10)} — **1D** net flow")
             if not broker_panel.empty:
                 mkt = top_broker_market_view(broker_panel, horizon="1D")
                 if not mkt.empty:
@@ -325,7 +328,7 @@ if page == "Momentum Scanner":
                     sub = broker_panel[
                         (broker_panel["symbol"] == sym_pick)
                         & (broker_panel["horizon"] == "1D")
-                        & (broker_panel["broker_id"].astype(str).isin(watch_ids))
+                        & (broker_panel["broker_id"].astype(str).isin(top10))
                     ]
                     if not sub.empty:
                         fig_br = px.bar(

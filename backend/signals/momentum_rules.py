@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backend.config import load_yaml_config
+from backend.config_signals import get_signal_config
 from backend.signals.effective_scores import distribution_mode, effective_scores
 
 TIER_ORDER = ("Invalidated", "Neutral", "Watch", "Setup", "Trigger", "Confirmed")
@@ -12,7 +12,7 @@ _effective_scores = effective_scores
 
 
 def assign_signal_tier(row: pd.Series) -> str:
-    cfg = load_yaml_config("settings.yaml")["signals"]
+    cfg = get_signal_config()
     p, ems, broker_p = effective_scores(row, cfg)
     drs = float(row.get("distribution_risk_score", 100) or 100)
     z = float(row.get("float_turnover_zscore", 0) or row.get("float_turnover_zscore_hv", 0) or 0)
@@ -20,10 +20,11 @@ def assign_signal_tier(row: pd.Series) -> str:
     shakeout = bool(row.get("dist_shakeout_flag", False) or row.get("pattern_dist_shakeout", False))
 
     dist_mode = distribution_mode(row, cfg)
-    trig_p = cfg["dist_trigger_probability"] if dist_mode else cfg["trigger_probability"]
-    conf_p = cfg["dist_confirmed_probability"] if dist_mode else cfg["confirmed_probability"]
-    ems_thr = cfg["dist_early_momentum_score"] if dist_mode else cfg["early_momentum_score"]
-    inv_drs = cfg.get("dist_invalidate_drs", 72)
+    trig_p = cfg.get("dist_trigger_probability", 0.30) if dist_mode else cfg.get("trigger_probability", 0.60)
+    conf_p = cfg.get("dist_confirmed_probability", 0.40) if dist_mode else cfg.get("confirmed_probability", 0.65)
+    ems_thr = cfg.get("dist_early_momentum_score", 20) if dist_mode else cfg.get("early_momentum_score", 70)
+    inv_drs = cfg.get("dist_invalidate_drs", 85)
+    watch_z = cfg.get("watch_zscore", 1.5)
 
     long_heavy = float(row.get("dist_3Y_power_score", 0) or 0) >= 2 and float(row.get("dist_1D_power_score", 3) or 3) >= 2
     if drs >= inv_drs and p < 0.40 and not shakeout and long_heavy:
@@ -32,15 +33,15 @@ def assign_signal_tier(row: pd.Series) -> str:
         return "Confirmed"
     if p >= trig_p and ems >= ems_thr * 0.85:
         return "Trigger"
-    if dist_mode and broker_p >= cfg.get("dist_broker_pressure_trigger", 55) and rank >= 0.12:
+    if dist_mode and broker_p >= cfg.get("dist_broker_pressure_trigger", 18) and rank >= 0.12:
         return "Trigger"
     if shakeout and rank >= 0.08 and drs < inv_drs:
         return "Setup"
-    if row.get("mtf_convergence", 0) >= 0.5 and z >= cfg["watch_zscore"]:
+    if row.get("mtf_convergence", 0) >= 0.5 and z >= watch_z:
         return "Setup"
     if dist_mode and (rank >= 0.15 or broker_p >= 45 or z >= 1.0):
         return "Setup"
-    if z >= cfg["watch_zscore"] or row.get("acc_1D_power_score", 0) >= 2:
+    if z >= watch_z or row.get("acc_1D_power_score", 0) >= 2:
         return "Watch"
     if dist_mode and (rank >= 0.06 or broker_p >= 35):
         return "Watch"

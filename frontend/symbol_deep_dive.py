@@ -10,7 +10,10 @@ from plotly.subplots import make_subplots
 
 from backend.llm.analyst import generate_symbol_report, llm_status
 from backend.quant.engine import run_quant_analysis
-from backend.scanner.broker_desk import circular_detail, _watch_brokers
+from backend.agents.orchestrator import run_analysis_swarm
+from backend.knowledge.graph_store import LogicGraphStore
+from backend.scanner.broker_desk import circular_detail
+from backend.scanner.broker_top10 import discover_top_brokers, symbol_top_brokers_table
 from backend.scanner.broker_insights import horizon_net_flow
 from backend.scanner.symbol_lookup import enrich_symbol_row
 from backend.models.trainer import compute_shap_values
@@ -200,20 +203,33 @@ def render_symbol_deep_dive(
         if broker_panel.empty:
             st.info("Run pipeline for broker-level data.")
         else:
+            top10_ids = discover_top_brokers(broker_panel, top_n=10)
+            st.caption(f"**Top 10 brokers** (market 1D activity): {', '.join(top10_ids)}")
+            btable = symbol_top_brokers_table(sym, broker_panel, top_n=10)
+            if not btable.empty:
+                st.dataframe(btable, use_container_width=True, hide_index=True)
+                active = btable[btable["activity_qty"] > 0]
+                if not active.empty:
+                    st.plotly_chart(
+                        px.bar(active, x="broker_id", y="conviction_score", color="bias",
+                               title=f"{sym} — top 10 broker conviction"),
+                        use_container_width=True,
+                    )
             detail = circular_detail(sym, broker_panel)
-            st.markdown(f"**{detail.get('verdict')}**")
+            st.markdown(f"**Circular:** {detail.get('verdict')}")
             for line in detail.get("explanation", []):
                 st.markdown(line)
-            watch = _watch_brokers()
-            sub = broker_panel[
-                (broker_panel["symbol"].astype(str).str.upper() == sym)
-                & (broker_panel["horizon"] == "1D")
-                & (broker_panel["broker_id"].astype(str).isin(watch))
-            ]
-            if not sub.empty:
-                sub = sub.copy()
-                sub["net_amount"] = pd.to_numeric(sub["net_amount"], errors="coerce").fillna(0)
-                st.plotly_chart(px.bar(sub, x="broker_id", y="net_amount", color="net_amount"), use_container_width=True)
+            if st.button("Run parallel analysis agents", key=f"swarm_{sym}"):
+                with st.spinner("Agents: volumetric · broker · momentum · knowledge…"):
+                    st.session_state[f"swarm_{sym}"] = run_analysis_swarm(
+                        sym, row, sym_panel, broker_panel, universe_df
+                    )
+            swarm = st.session_state.get(f"swarm_{sym}")
+            if swarm:
+                g = LogicGraphStore().subgraph_symbol(sym)
+                st.caption(f"Logic graph: {len(g['nodes'])} nodes · {len(g['edges'])} edges")
+                if g["edges"]:
+                    st.dataframe(pd.DataFrame(g["edges"]), hide_index=True, use_container_width=True)
 
     with tab_l:
         if not llm_status().get("ready"):

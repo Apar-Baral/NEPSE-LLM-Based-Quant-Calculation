@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backend.config import load_yaml_config
+from backend.config_signals import get_signal_config
 
 
 def distribution_mode(row: pd.Series, cfg: dict | None = None) -> bool:
-    cfg = cfg or load_yaml_config("settings.yaml")["signals"]
+    cfg = cfg or get_signal_config()
     if not cfg.get("distribution_mode", True):
         return False
     acc_power = float(row.get("acc_1D_power_score", 0) or 0)
@@ -21,7 +21,7 @@ def effective_scores(row: pd.Series, cfg: dict | None = None) -> tuple[float, fl
     Return (p_long_effective, ems_effective, broker_pressure).
     Adjusts raw model scores when only distribution floorsheet data exists.
     """
-    cfg = cfg or load_yaml_config("settings.yaml")["signals"]
+    cfg = cfg or get_signal_config()
     p = float(row.get("p_long_momentum", 0) or 0)
     ems = float(row.get("early_momentum_score", 0) or 0)
     rank = float(row.get("early_rank_score", 0) or 0)

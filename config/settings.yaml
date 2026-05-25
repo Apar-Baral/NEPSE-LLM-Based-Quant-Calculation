@@ -38,6 +38,7 @@ scanner:
 
 brokers:
   watch_list: [58, 49, 45, 55, 34, 6, 38, 43, 70]
+  analyze_top_n: 10  # mathematically rank top brokers by market activity
   # Circular — universe-calibrated (not every stock)
   circular_flag_percentile: 0.93
   min_wash_score: 62

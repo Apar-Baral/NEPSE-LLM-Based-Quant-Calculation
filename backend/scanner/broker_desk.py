@@ -97,13 +97,19 @@ def analyze_symbol_brokers(sym: str, broker_panel: pd.DataFrame, horizon: str = 
         amt_penalty = max(0.0, 100.0 - amt_dir) * 0.25
     out["circular_risk"] = round(min(100.0, out["wash_score"] * 0.55 + rec_penalty + amt_penalty), 1)
 
+    from backend.scanner.broker_top10 import aggregate_top_broker_scores, discover_top_brokers
+
+    top_ids = discover_top_brokers(broker_panel, horizon)
+    watch = set(top_ids) | watch
     top = sub[sub["broker_id"].isin(watch)]
     if not top.empty:
         out["top_broker_net_lac"] = float(top["net_amount"].sum())
         out["top_broker_buy_lac"] = float(top["buy_qty"].sum() - top["sell_qty"].sum())
         active = top.groupby("broker_id")["net_amount"].sum().sort_values(ascending=False)
-        out["top_broker_ids"] = ",".join(f"{k}({v:.0f})" for k, v in active.head(3).items())
+        out["top_broker_ids"] = ",".join(f"{k}({v:.0f})" for k, v in active.head(10).items())
 
+    agg10 = aggregate_top_broker_scores(sym, broker_panel)
+    out.update(agg10)
     return out
 
 
@@ -188,14 +194,16 @@ def circular_detail(sym: str, broker_panel: pd.DataFrame) -> dict:
     return {**m, "verdict": verdict, "explanation": lines}
 
 
-def top_broker_market_view(broker_panel: pd.DataFrame, horizon: str = "1D", top_n: int = 15) -> pd.DataFrame:
+def top_broker_market_view(broker_panel: pd.DataFrame, horizon: str = "1D", top_n: int = 10) -> pd.DataFrame:
     if broker_panel.empty:
         return pd.DataFrame()
+    from backend.scanner.broker_top10 import discover_top_brokers
+
     sub = broker_panel[broker_panel["horizon"] == horizon].copy()
     if sub.empty:
         sub = broker_panel[broker_panel["horizon"].isin(SHORT_HORIZONS)].copy()
-    watch = set(_watch_brokers())
-    sub = sub[sub["broker_id"].astype(str).isin(watch)]
+    top_ids = discover_top_brokers(broker_panel, horizon, top_n)
+    sub = sub[sub["broker_id"].astype(str).isin(top_ids)]
     if sub.empty:
         return pd.DataFrame()
 

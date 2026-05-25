@@ -39,7 +39,12 @@ def get_settings() -> Settings:
 def load_yaml_config(name: str) -> dict[str, Any]:
     path = CONFIG_DIR / name
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def clear_config_cache() -> None:
+    load_yaml_config.cache_clear()
 
 
 def ensure_dirs() -> None:
