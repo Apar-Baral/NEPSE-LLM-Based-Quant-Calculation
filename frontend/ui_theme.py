@@ -6,6 +6,15 @@ import streamlit as st
 
 from frontend.display_config import TIER_COLORS
 
+# Plotly: mouse-wheel zoom + toolbar (use on st.plotly_chart(..., config=PLOTLY_ZOOM_CONFIG))
+PLOTLY_ZOOM_CONFIG: dict = {
+    "scrollZoom": True,
+    "displayModeBar": True,
+    "displaylogo": False,
+    "doubleClick": "reset",
+    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+}
+
 
 def inject_global_css() -> None:
     tier_css = "".join(

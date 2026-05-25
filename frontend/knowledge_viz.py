@@ -12,6 +12,7 @@ from backend.config import DB_PATH, PROCESSED_DIR
 from backend.knowledge.graph_store import GRAPH_PATH, LogicGraphStore
 from backend.knowledge.vector_rag import VECTOR_PATH, VectorLogicRAG
 from backend.llm.analyst import llm_status
+from frontend.ui_theme import PLOTLY_ZOOM_CONFIG
 
 NODE_COLORS = {
     "symbol": "#58a6ff",
@@ -152,11 +153,12 @@ def build_comprehensive_figure(sub: dict, title: str, filter_kinds: list[str] | 
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         margin=dict(l=10, r=10, t=60, b=10),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, fixedrange=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, fixedrange=False),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         height=640,
+        dragmode="pan",
     )
     return fig
 
@@ -238,7 +240,8 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
 
     fig = build_comprehensive_figure(sub, f"{sym} — quant · financial · broker · LLM", filter_kinds=filter_dom or None)
     if fig:
-        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Scroll to zoom · drag to pan · double-click to reset · use toolbar for box zoom.")
+        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_ZOOM_CONFIG)
     elif sym:
         st.info(f"Deploy **{sym}** agent fleet in Symbol Deep Dive → Brokers to build the comprehensive graph.")
 

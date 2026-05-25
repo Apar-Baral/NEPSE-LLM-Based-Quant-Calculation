@@ -713,15 +713,22 @@ elif page == "Chat":
                 preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
             )
             if not preds.empty
-            else preds
+            else pd.DataFrame()
         )
         extra = pd.DataFrame()
         if chat_sym and chat_sym != "—":
-            extra = enrich_symbol_row(chat_sym, preds, panel, broker_panel, features=features)
+            extra = enrich_symbol_row(
+                chat_sym, preds, panel, broker_panel, features=features, universe_df=universe
+            )
+        if not extra.empty and not universe.empty:
+            universe = pd.concat([extra, universe], ignore_index=True).drop_duplicates(
+                subset=["symbol"], keep="first"
+            )
+        elif not extra.empty:
+            universe = extra
         with st.spinner("Thinking…"):
-            _cq = importlib.import_module("backend.llm.analyst").chat_query
-            kwargs = {"extra_rows": extra} if not extra.empty else {}
-            ans = _cq(q, universe, **kwargs)
+            analyst = importlib.reload(importlib.import_module("backend.llm.analyst"))
+            ans = analyst.chat_query(q, universe)
         st.session_state["chat_last_answer"] = ans
     if st.session_state.get("chat_last_answer"):
         st.markdown(st.session_state["chat_last_answer"])

@@ -19,6 +19,7 @@ from backend.scanner.symbol_lookup import enrich_symbol_row
 from backend.models.trainer import compute_shap_values
 from backend.quant.algorithm_specs import spec_for_step
 from frontend.display_config import TIER_COLORS, TIER_HELP
+from frontend.ui_theme import PLOTLY_ZOOM_CONFIG
 
 
 def _turnover_peer_figure(sym: str, universe_df: pd.DataFrame) -> go.Figure | None:
@@ -413,7 +414,7 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                 )
                 fig_kg = build_comprehensive_figure(g, f"{sym} — comprehensive knowledge")
                 if fig_kg:
-                    st.plotly_chart(fig_kg, use_container_width=True)
+                    st.plotly_chart(fig_kg, use_container_width=True, config=PLOTLY_ZOOM_CONFIG)
                 elif g["edges"]:
                     st.dataframe(pd.DataFrame(g["edges"]), hide_index=True, use_container_width=True)
                 st.caption("Open sidebar → **Knowledge Graph** for full interactive graph + vector search.")
@@ -426,7 +427,12 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
             import importlib
             uni = universe_df if universe_df is not None and not universe_df.empty else enriched
             with st.spinner("LLM…"):
-                ans = importlib.import_module("backend.llm.analyst").chat_query(q, uni, extra_rows=enriched)
+                uni_merged = (
+                    pd.concat([enriched, uni], ignore_index=True).drop_duplicates(subset=["symbol"], keep="first")
+                    if not uni.empty
+                    else enriched
+                )
+                ans = importlib.import_module("backend.llm.analyst").chat_query(q, uni_merged)
             st.session_state[f"adv_{sym}"] = ans
         if st.session_state.get(f"adv_{sym}"):
             st.markdown(st.session_state[f"adv_{sym}"])
