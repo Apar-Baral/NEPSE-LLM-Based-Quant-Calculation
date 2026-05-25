@@ -145,10 +145,10 @@ def get_latest_scanner_universe(
     day = attach_broker_metrics(day, p)
     out = select_high_volume_universe(day, top_n=top_n)
     if not out.empty:
-        from backend.scanner.llm_scorer import score_universe_with_llm
+        from backend.scanner.llm_scorer import apply_cached_llm_scores
         from backend.signals.universe_tiers import assign_universe_tiers
 
-        out = score_universe_with_llm(out, p, fetch_new=False)
+        out = apply_cached_llm_scores(out)
         out["early_rank_score"] = compute_early_rank_score(out)
         out = out.sort_values("early_rank_score", ascending=False)
         out["volume_rank"] = range(1, len(out) + 1)

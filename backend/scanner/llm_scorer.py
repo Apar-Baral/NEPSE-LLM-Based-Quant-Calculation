@@ -66,14 +66,57 @@ def _call_llm_batch(batch_lines: list[str]) -> list[dict]:
         return []
 
 
+def _load_cache_for_universe(universe: pd.DataFrame) -> tuple[dict, dict, str]:
+    cache: dict = {}
+    if CACHE_PATH.exists():
+        try:
+            cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            cache = {}
+    rd = (
+        str(universe["report_date"].iloc[0].date())
+        if "report_date" in universe.columns and len(universe)
+        else "latest"
+    )
+    cache_key = f"scores_{rd}"
+    return cache, cache.get(cache_key, {}), cache_key
+
+
+def _merge_cached_into_df(out: pd.DataFrame, cached_rows: dict, work_symbols: set[str]) -> pd.DataFrame:
+    for idx, row in out.iterrows():
+        sym = row["symbol"]
+        if sym not in cached_rows:
+            continue
+        c = cached_rows[sym]
+        out.at[idx, "llm_p_long"] = c.get("llm_p_long")
+        out.at[idx, "llm_tier"] = c.get("llm_tier")
+        out.at[idx, "llm_note"] = c.get("llm_note")
+        if sym in work_symbols:
+            if c.get("llm_p_long") is not None:
+                out.at[idx, "p_long_momentum"] = c.get("llm_p_long")
+            if c.get("llm_tier"):
+                out.at[idx, "signal_tier"] = c.get("llm_tier")
+    return out
+
+
+def apply_cached_llm_scores(universe: pd.DataFrame) -> pd.DataFrame:
+    """Merge LLM scores from disk cache only (fast, no API calls)."""
+    out = universe.copy()
+    for col in ("llm_p_long", "llm_tier", "llm_note"):
+        if col not in out.columns:
+            out[col] = None
+    _, cached_rows, _ = _load_cache_for_universe(out)
+    work_symbols = set(out["symbol"].head(load_yaml_config("settings.yaml").get("scanner", {}).get("llm_score_max", 60)))
+    return _merge_cached_into_df(out, cached_rows, work_symbols)
+
+
 def score_universe_with_llm(
     universe: pd.DataFrame,
     panel: pd.DataFrame,
     batch_size: int = 12,
     max_symbols: int | None = None,
-    fetch_new: bool = True,
 ) -> pd.DataFrame:
-    """Attach llm_p_long, llm_tier, llm_note from DeepSeek/OpenAI (cached)."""
+    """Fetch new LLM scores for uncached symbols and merge into universe."""
     out = universe.copy()
     for col in ("llm_p_long", "llm_tier", "llm_note"):
         if col not in out.columns:
@@ -81,30 +124,20 @@ def score_universe_with_llm(
 
     status = llm_status()
     if not status.get("ready"):
-        return out
+        return apply_cached_llm_scores(out)
 
     cfg = load_yaml_config("settings.yaml").get("scanner", {})
     max_symbols = max_symbols or cfg.get("llm_score_max", 60)
     work = out.head(max_symbols).copy()
 
-    cache: dict = {}
-    if CACHE_PATH.exists():
-        try:
-            cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            cache = {}
-
-    rd = str(work["report_date"].iloc[0].date()) if "report_date" in work.columns and len(work) else "latest"
-    cache_key = f"scores_{rd}"
-    cached_rows = cache.get(cache_key, {})
+    cache, cached_rows, cache_key = _load_cache_for_universe(work)
 
     pending = []
-    if fetch_new:
-        for _, row in work.iterrows():
-            sym = row["symbol"]
-            if sym in cached_rows:
-                continue
-            pending.append(_symbol_brief(row, panel))
+    for _, row in work.iterrows():
+        sym = row["symbol"]
+        if sym in cached_rows:
+            continue
+        pending.append(_symbol_brief(row, panel))
 
     for i in range(0, len(pending), batch_size):
         batch = pending[i : i + batch_size]
@@ -125,15 +158,4 @@ def score_universe_with_llm(
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
 
-    for idx, row in out.iterrows():
-        sym = row["symbol"]
-        if sym in cached_rows:
-            c = cached_rows[sym]
-            out.at[idx, "llm_p_long"] = c.get("llm_p_long")
-            out.at[idx, "llm_tier"] = c.get("llm_tier")
-            out.at[idx, "llm_note"] = c.get("llm_note")
-            if sym in work["symbol"].values:
-                out.at[idx, "p_long_momentum"] = c.get("llm_p_long", row.get("p_long_momentum"))
-                out.at[idx, "signal_tier"] = c.get("llm_tier", row.get("signal_tier"))
-
-    return out
+    return _merge_cached_into_df(out, cached_rows, set(work["symbol"].tolist()))
