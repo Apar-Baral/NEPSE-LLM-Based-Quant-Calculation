@@ -77,6 +77,12 @@ def enrich_symbol_row(
 
     row = row.tail(1).copy()
     row = _merge_feature_row(row, features, sym)
+    # Recompute floorsheet EMS from merged feature columns when still zero
+    fr = features[features["symbol"].astype(str).str.upper() == sym].tail(1) if features is not None and not features.empty else pd.DataFrame()
+    if not fr.empty and "floorsheet_momentum_score" in fr.columns:
+        row["floorsheet_momentum_score"] = fr["floorsheet_momentum_score"].values[0]
+    if not fr.empty and "distribution_risk_score" in fr.columns:
+        row["distribution_risk_score"] = fr["distribution_risk_score"].values[0]
     row = attach_volume_from_panel(row, panel)
     row = attach_ltp_from_panel(row, panel, broker_panel)
     row = attach_broker_metrics(row, panel)
@@ -91,7 +97,9 @@ def enrich_symbol_row(
     row["early_rank_score"] = compute_early_rank_score(row)
     row = coerce_numeric(row)
     cfg = load_yaml_config("settings.yaml")["signals"]
+    raw_p = float(row.iloc[0].get("p_long_momentum") or 0)
     p_eff, ems_eff, _ = effective_scores(row.iloc[0], cfg)
+    row["p_long_momentum_raw"] = raw_p
     row["p_long_momentum"] = p_eff
     row["early_momentum_score"] = ems_eff
     row["signal_tier"] = assign_universe_tiers(row)

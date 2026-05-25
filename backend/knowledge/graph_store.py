@@ -51,6 +51,29 @@ class LogicGraphStore:
                     self._add_edge(sid, bid_node, "traded_by")
                     self._add_edge(bid_node, pid, "influences")
 
+    def add_broker_flow_edges(self, sym: str, broker_table: list[dict]) -> None:
+        """Link symbol to brokers with flow metadata (post fleet deploy)."""
+        sym = sym.upper()
+        sid = self._nid("symbol", sym)
+        self._upsert_node(sid, "symbol", sym, {})
+        for row in broker_table[:15]:
+            bid = str(row.get("broker_id", ""))
+            if not bid or bid == "—":
+                continue
+            bid_node = self._nid("broker", bid)
+            self._upsert_node(
+                bid_node,
+                "broker",
+                bid,
+                {
+                    "bias": row.get("bias"),
+                    "buy_share_pct": row.get("buy_share_pct"),
+                    "conviction": row.get("conviction_score"),
+                },
+            )
+            rel = row.get("bias", "flow")
+            self._add_edge(sid, bid_node, str(rel))
+
         tier_node = self._nid("signal", tier)
         self._upsert_node(tier_node, "signal_tier", tier, {})
         self._add_edge(sid, tier_node, "classified_as")

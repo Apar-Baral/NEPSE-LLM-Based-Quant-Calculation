@@ -36,6 +36,15 @@ scanner:
   llm_score_max: 60
   llm_refresh_max_fetch: 12  # max new LLM API calls per refresh (avoids hang)
 
+agents:
+  max_workers: 48          # parallel threads for 100+ agent fleet
+  broker_agent_count: 50   # per-broker desk agents (top market brokers)
+  domain_weights:
+    quant: 0.30
+    financial: 0.22
+    broker: 0.28
+    llm: 0.20
+
 brokers:
   watch_list: [58, 49, 45, 55, 34, 6, 38, 43, 70]
   analyze_top_n: 10  # mathematically rank top brokers by market activity

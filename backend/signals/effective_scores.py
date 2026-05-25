@@ -30,9 +30,12 @@ def effective_scores(row: pd.Series, cfg: dict | None = None) -> tuple[float, fl
 
     if distribution_mode(row, cfg):
         turn = float(row.get("daily_turnover_lac") or 0)
-        turn_boost = min(0.22, turn / 1200) if turn > 0 else 0
-        p = max(p, rank * 0.72, broker_p / 200, 0.28 + turn_boost)
-        ems = max(ems, floorsheet, broker_p * 0.45, rank * 100 * 0.4, 12 + turn_boost * 80)
+        # Modest turnover lift — avoid labeling every high-volume name as 50%+ P(long)
+        turn_boost = min(0.08, (turn / 3000) * 0.08) if turn > 0 else 0
+        p = max(p, rank * 0.48, broker_p / 280, 0.18 + turn_boost)
+        p = min(p, 0.72)
+        ems = max(ems, floorsheet, broker_p * 0.32, rank * 100 * 0.22, 6 + turn_boost * 35)
+        ems = min(ems, 50.0)
     elif rank > 0:
         p = max(p, rank * 0.25)
         ems = max(ems, rank * 100 * 0.2)

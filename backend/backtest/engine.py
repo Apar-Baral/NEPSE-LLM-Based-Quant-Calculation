@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+from backend.scanner.volume_universe import compute_early_rank_score
+from backend.signals.momentum_rules import apply_momentum_rules
+from backend.signals.universe_tiers import assign_universe_tiers
+
 
 def build_price_series_from_features(features: pd.DataFrame) -> pd.DataFrame:
     """Multi-day LTP proxy from feature matrix (one row per symbol per report_date)."""
@@ -34,12 +38,46 @@ def merge_ohlcv_sources(ohlcv: pd.DataFrame, features: pd.DataFrame | None) -> p
     return combined.sort_values(["symbol", "date"])
 
 
+def prepare_backtest_signals(
+    predictions: pd.DataFrame,
+    features: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Build multi-day signal history for backtest.
+    Uses all feature rows (several report_dates) with tiers recomputed — not only latest predictions.
+    """
+    diag: dict = {"source": "none", "rows": 0, "dates": 0, "tier_counts": {}}
+
+    if features is not None and not features.empty:
+        sig = apply_momentum_rules(features.copy(), predictions)
+        sig["early_rank_score"] = compute_early_rank_score(sig)
+        sig["signal_tier"] = assign_universe_tiers(sig)
+        diag["source"] = "features_history"
+        diag["rows"] = len(sig)
+        diag["dates"] = int(sig["report_date"].nunique())
+        diag["tier_counts"] = sig["signal_tier"].value_counts().to_dict()
+        return sig, diag
+
+    if predictions is not None and not predictions.empty:
+        pred = predictions.copy()
+        if "signal_tier" not in pred.columns:
+            pred["signal_tier"] = "Neutral"
+        diag["source"] = "predictions_only"
+        diag["rows"] = len(pred)
+        diag["dates"] = int(pred["report_date"].nunique())
+        diag["tier_counts"] = pred["signal_tier"].value_counts().to_dict()
+        return pred, diag
+
+    return pd.DataFrame(), diag
+
+
 def run_backtest(
     signals: pd.DataFrame,
     ohlcv: pd.DataFrame,
     entry_tier: str = "Trigger",
     hold_days: int = 10,
     features: pd.DataFrame | None = None,
+    entry_tiers: list[str] | None = None,
 ) -> dict:
     prices = merge_ohlcv_sources(ohlcv, features)
     meta = {
@@ -71,28 +109,57 @@ def run_backtest(
             **meta,
         }
 
-    tier_set = [entry_tier]
-    if entry_tier == "Trigger":
-        tier_set.append("Confirmed")
+    if entry_tiers:
+        tier_set = list(entry_tiers)
+    else:
+        tier_set = [entry_tier]
+        if entry_tier == "Trigger":
+            tier_set.extend(["Confirmed"])
+        elif entry_tier == "Setup":
+            tier_set.extend(["Trigger", "Confirmed"])
+        elif entry_tier == "Watch":
+            tier_set.extend(["Setup", "Trigger", "Confirmed"])
 
     entries = signals[signals["signal_tier"].isin(tier_set)].copy()
     entries["report_date"] = pd.to_datetime(entries["report_date"]).dt.normalize()
     entries["symbol"] = entries["symbol"].astype(str).str.upper()
 
+    prices = prices.copy()
+    prices["symbol"] = prices["symbol"].astype(str).str.upper()
+    prices["date"] = pd.to_datetime(prices["date"]).dt.normalize()
+
+    def _has_exit_date(sym: str, rd: pd.Timestamp) -> bool:
+        return bool(((prices["symbol"] == sym) & (prices["date"] > rd)).any())
+
+    before = len(entries)
+    dropped_latest = 0
+    if before:
+        entries = entries[entries.apply(lambda r: _has_exit_date(r["symbol"], r["report_date"]), axis=1)]
+        dropped_latest = before - len(entries)
+
     if entries.empty:
+        tc = signals["signal_tier"].value_counts().to_dict() if "signal_tier" in signals.columns else {}
+        msg = f"No rows match entry tiers {tier_set}."
+        if before and dropped_latest == before:
+            msg += (
+                f" All {before} matches are on the latest report_date — upload the **next trading day** "
+                f"or backtest will have no exit price."
+            )
+        elif dropped_latest:
+            msg += f" Dropped {dropped_latest} on latest date (no forward LTP)."
+        msg += f" Tier counts: {tc}."
         return {
             "trades": 0,
             "win_rate": 0,
             "avg_return": 0,
             "cagr_proxy": 0,
             "details": [],
-            "message": f"No signals with tier {entry_tier} / Confirmed on saved predictions.",
+            "message": msg,
+            "tier_counts": tc,
+            "tier_filter": tier_set,
+            "dropped_latest_date": dropped_latest,
             **meta,
         }
-
-    prices = prices.copy()
-    prices["symbol"] = prices["symbol"].astype(str).str.upper()
-    prices["date"] = pd.to_datetime(prices["date"]).dt.normalize()
 
     trades = []
     skipped = {"no_prices": 0, "single_day": 0, "bad_entry": 0}
@@ -148,11 +215,12 @@ def run_backtest(
             "cagr_proxy": 0,
             "details": [],
             "message": (
-                f"0 trades filled. Tier matches: {len(entries)}. "
-                f"Need 2+ price dates per symbol (upload more daily files). "
-                f"Skipped: {skipped}"
+                f"0 trades filled. Eligible entries (with future LTP): {len(entries)}. "
+                f"Skipped while simulating: {skipped}. "
+                f"Dropped on latest date (no exit day): {dropped_latest}."
             ),
             "skipped": skipped,
+            "dropped_latest_date": dropped_latest,
             **meta,
         }
 
@@ -166,6 +234,9 @@ def run_backtest(
         "cagr_proxy": float(avg_ret * (252 / max(hold_days, 1)) / 100),
         "details": trades[:100],
         "message": "ok",
-        "skipped": skipped,
-        **meta,
-    }
+            "skipped": skipped,
+            "tier_filter": tier_set,
+            "entries_matched": len(entries),
+            "dropped_latest_date": dropped_latest,
+            **meta,
+        }

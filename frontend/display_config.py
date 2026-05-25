@@ -16,7 +16,7 @@ TIER_COLORS = {
 }
 
 TIER_HELP = {
-    "Confirmed": "High probability + strong floorsheet early score",
+    "Confirmed": "Strong effective P(long) + EMS + early rank (rare)",
     "Trigger": "Actionable early setup — review for entry",
     "Setup": "Dist shakeout / broker skew building",
     "Watch": "Volume + early rank worth monitoring",
@@ -37,6 +37,7 @@ COLUMN_LABELS = {
     "p_long_momentum": "P(Long 10D) %",
     "expected_return_10d": "Exp Return 10D %",
     "early_momentum_score": "Early Momentum",
+    "floorsheet_momentum_score": "Floorsheet",
     "broker_pressure": "Broker Pressure",
     "distribution_risk_score": "Dist Risk",
     "top_broker_ids": "Top Brokers (58,49…)",

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from backend.config import load_yaml_config
+from backend.scanner.broker_flow import broker_flow_metrics
 
 SHORT_HORIZONS = ("1D", "2D", "3D", "4D", "1W")
 
@@ -51,33 +52,38 @@ def discover_top_brokers(broker_panel: pd.DataFrame, horizon: str = "1D", top_n:
 
 
 def analyze_broker_row(broker_id: str, grp: pd.DataFrame, symbol_activity: float) -> dict:
-    buy = pd.to_numeric(grp.get("buy_qty", 0), errors="coerce").fillna(0).sum()
-    sell = pd.to_numeric(grp.get("sell_qty", 0), errors="coerce").fillna(0).sum()
-    net_qty = pd.to_numeric(grp.get("net_qty", 0), errors="coerce").fillna(0).sum()
-    net_amt = pd.to_numeric(grp.get("net_amount", 0), errors="coerce").fillna(0).sum()
-    activity = buy + sell
-    two_side = min(buy, sell) / (buy + sell + 1e-9) * 100
+    m = broker_flow_metrics(grp)
+    activity = m["activity_qty"]
     share = activity / (symbol_activity + 1e-9) * 100
-    directional = abs(net_qty) / (activity + 1e-9) * 100
-    # Broker conviction score 0-100
+    buy_share = m["buy_share_pct"]
+    lp = abs(m["long_pressure_qty"])
     conviction = (
         min(40, share * 0.4)
-        + min(30, directional * 0.3)
-        + min(20, abs(net_amt) / (abs(net_amt) + activity + 1e-9) * 100 * 0.2)
-        - min(15, two_side * 0.15)
+        + min(25, buy_share * 0.25)
+        + min(20, lp / (activity + 1e-9) * 100 * 0.2)
+        - min(15, m["two_side_pct"] * 0.15)
     )
+    if m["bias"] == "acc_buy":
+        conviction += 8
+    elif m["bias"] == "dist_heavy":
+        conviction = max(0, conviction - 5)
+
     return {
         "broker_id": broker_id,
-        "buy_qty": float(buy),
-        "sell_qty": float(sell),
-        "net_qty": float(net_qty),
-        "net_amount_lac": float(net_amt),
-        "activity_qty": float(activity),
+        "buy_qty": m["buy_qty"],
+        "sell_qty": m["sell_qty"],
+        "net_qty": m["net_qty"],
+        "long_pressure": m["long_pressure_qty"],
+        "net_amount_lac": m["net_amount_lac"],
+        "activity_qty": activity,
         "share_pct": round(share, 2),
-        "two_side_pct": round(two_side, 2),
-        "directional_pct": round(directional, 2),
+        "buy_share_pct": buy_share,
+        "two_side_pct": m["two_side_pct"],
+        "directional_pct": m["directional_pct"],
         "conviction_score": round(max(0, min(100, conviction)), 1),
-        "bias": "buy" if net_qty > 0 else ("sell" if net_qty < 0 else "neutral"),
+        "bias": m["bias"],
+        "flow_label": m["flow_label"],
+        "signal": m["signal"],
     }
 
 
@@ -118,13 +124,17 @@ def symbol_top_brokers_table(
                     "buy_qty": 0.0,
                     "sell_qty": 0.0,
                     "net_qty": 0.0,
+                    "long_pressure": 0.0,
                     "net_amount_lac": 0.0,
                     "activity_qty": 0.0,
                     "share_pct": 0.0,
+                    "buy_share_pct": 0.0,
                     "two_side_pct": 0.0,
                     "directional_pct": 0.0,
                     "conviction_score": 0.0,
                     "bias": "—",
+                    "flow_label": "No 1D activity",
+                    "signal": "neutral",
                 }
             )
         else:
@@ -160,7 +170,8 @@ def aggregate_top_broker_scores(sym: str, broker_panel: pd.DataFrame) -> dict:
         for _, r in active.head(10).iterrows()
     )
     net_sum = float(active["net_amount_lac"].sum())
-    buy_bias = float((active["bias"] == "buy").sum())
+    bullish_bias = {"acc_buy", "absorption", "buy"}
+    buy_bias = float(active["bias"].isin(bullish_bias).sum())
     conv_mean = float(active["conviction_score"].mean()) if not active.empty else 0.0
 
     return {

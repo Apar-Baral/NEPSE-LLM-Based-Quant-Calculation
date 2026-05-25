@@ -17,6 +17,7 @@ from backend.scanner.broker_top10 import discover_top_brokers, symbol_top_broker
 from backend.scanner.broker_insights import horizon_net_flow
 from backend.scanner.symbol_lookup import enrich_symbol_row
 from backend.models.trainer import compute_shap_values
+from backend.quant.algorithms_catalog import ALGORITHM_SECTIONS
 from frontend.display_config import TIER_COLORS, TIER_HELP
 
 
@@ -81,14 +82,36 @@ def _horizon_heatmap(sym_panel: pd.DataFrame, sym: str) -> go.Figure | None:
 
 
 def _render_quant_steps(quant: dict) -> None:
-    st.markdown(f"### {quant['verdict']} — **{quant['composite_score']}/100** ({quant['steps_passed']}/{quant['steps_total']} steps pass)")
+    st.markdown(f"### {quant['verdict']} — composite **{quant['composite_score']}/100**")
+    st.caption(f"Steps passed: **{quant['steps_passed']}** / {quant['steps_total']} (need 3+ for high conviction)")
+
+    rows = []
+    for step in quant["steps"]:
+        rows.append(
+            {
+                "Step": step.get("step", ""),
+                "Score": step.get("score", 0),
+                "Pass": "Yes" if step.get("pass") else "No",
+                "Summary": "; ".join(step.get("notes", [])[:2])[:120],
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
     for step in quant["steps"]:
         icon = "✅" if step.get("pass") else "❌"
-        with st.expander(f"{icon} {step['step']} — score {step['score']}/100", expanded=step["step"] in ("Quant momentum", "LLM verification")):
+        with st.expander(f"{icon} {step['step']} — {step.get('score')}/100", expanded=False):
             for n in step.get("notes", []):
                 st.markdown(f"- {n}")
             if step.get("order_block_bias"):
-                st.caption(f"Order block: {step['order_block_bias']} | FVG bull={step.get('bullish_fvg')} bear={step.get('bearish_fvg')}")
+                st.caption(
+                    f"Order block: {step.get('order_block_bias')} | "
+                    f"FVG bull={step.get('bullish_fvg')} bear={step.get('bearish_fvg')}"
+                )
+            if step.get("p_long_effective") is not None:
+                st.caption(
+                    f"Effective P(long) **{float(step['p_long_effective']):.0%}** "
+                    f"(raw {float(step.get('p_long_raw', 0)):.0%}) · EMS **{float(step.get('ems_effective', 0)):.0f}**"
+                )
 
 
 def render_symbol_deep_dive(
@@ -135,11 +158,38 @@ def render_symbol_deep_dive(
     c6.metric("Floorsheet", f"{float(row.get('floorsheet_momentum_score') or 0):.0f}")
     c7.metric("LTP", f"{float(row.get('ltp')):.2f}" if pd.notna(row.get("ltp")) else "—")
 
+    fs = float(row.get("floorsheet_momentum_score") or 0)
+    if fs <= 0:
+        st.warning(
+            "Floorsheet momentum is 0 — upload **Accumulation** data or run pipeline; "
+            "distribution-only mode uses floorsheet proxy from dist horizons."
+        )
+
+    with st.expander("Score breakdown (raw vs effective)", expanded=False):
+        raw_p = float(row.get("p_long_momentum_raw") or row.get("p_long_momentum") or 0)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Metric": "P(long) raw (ML)", "Value": f"{raw_p:.0%}" if raw_p <= 1 else f"{raw_p:.1f}%"},
+                    {"Metric": "P(long) effective", "Value": f"{p_show:.0%}"},
+                    {"Metric": "EMS effective", "Value": f"{ems_show:.0f}"},
+                    {"Metric": "Floorsheet score", "Value": f"{fs:.0f}"},
+                    {"Metric": "Dist risk", "Value": f"{float(row.get('distribution_risk_score') or 0):.0f}"},
+                    {"Metric": "Signal tier", "Value": str(tier)},
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+
     tab_q, tab_v, tab_c, tab_b, tab_l = st.tabs(
         ["Quant pipeline", "Volume", "Floorsheet & PA", "Brokers", "LLM advisor"]
     )
 
     with tab_q:
+        with st.expander("Algorithms in this pipeline", expanded=False):
+            for sec in ALGORITHM_SECTIONS[:4]:
+                st.markdown(f"**{sec['title']}** — " + "; ".join(sec["items"][:4]) + " …")
         _render_quant_steps(quant)
         col_l, col_r = st.columns(2)
         with col_l:
@@ -203,11 +253,32 @@ def render_symbol_deep_dive(
         if broker_panel.empty:
             st.info("Run pipeline for broker-level data.")
         else:
+            st.info(
+                "**Distribution floorsheet:** high `sell_qty` is normal (brokers distributing stock). "
+                "**Bias** uses buy-share & accumulation — not raw net_qty sign. Upload **Accumulation** for true acc_buy desks."
+            )
             top10_ids = discover_top_brokers(broker_panel, top_n=10)
             st.caption(f"**Top 10 brokers** (market 1D activity): {', '.join(top10_ids)}")
             btable = symbol_top_brokers_table(sym, broker_panel, top_n=10)
             if not btable.empty:
-                st.dataframe(btable, use_container_width=True, hide_index=True)
+                show_cols = [
+                    c
+                    for c in (
+                        "broker_id", "buy_qty", "sell_qty", "buy_share_pct", "long_pressure",
+                        "net_amount_lac", "share_pct", "conviction_score", "bias", "flow_label",
+                    )
+                    if c in btable.columns
+                ]
+                st.dataframe(
+                    btable[show_cols] if show_cols else btable,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "bias": st.column_config.TextColumn("Bias", help="acc_buy / absorption / dist_heavy / two_sided"),
+                        "buy_share_pct": st.column_config.NumberColumn("Buy %", format="%.1f"),
+                        "flow_label": st.column_config.TextColumn("Meaning"),
+                    },
+                )
                 active = btable[btable["activity_qty"] > 0]
                 if not active.empty:
                     st.plotly_chart(
@@ -215,21 +286,87 @@ def render_symbol_deep_dive(
                                title=f"{sym} — top 10 broker conviction"),
                         use_container_width=True,
                     )
+                else:
+                    st.caption("Top-10 market brokers listed; this symbol had no 1D qty on those desks.")
+            else:
+                st.info(f"No broker rows for **{sym}** on the latest report date — re-run pipeline / broker backfill.")
             detail = circular_detail(sym, broker_panel)
             st.markdown(f"**Circular:** {detail.get('verdict')}")
             for line in detail.get("explanation", []):
                 st.markdown(line)
-            if st.button("Run parallel analysis agents", key=f"swarm_{sym}"):
-                with st.spinner("Agents: volumetric · broker · momentum · knowledge…"):
-                    st.session_state[f"swarm_{sym}"] = run_analysis_swarm(
-                        sym, row, sym_panel, broker_panel, universe_df
+            from backend.agents.fleet import fleet_status
+
+            fs = fleet_status()
+            with st.expander("What are the agents? (plain English)", expanded=False):
+                st.markdown(
+                    """
+**Purpose:** Each agent is one automated check (like a specialist on a trading desk).  
+They run together in ~1 second and vote **bullish / bearish / neutral** with a **0–100 score**.
+
+| Domain | What it checks |
+|--------|----------------|
+| **Quant** | Volume, ML P(long), RSI, Bollinger, order blocks, FVG, dist/acc power |
+| **Financial** | Risk, drawdown, Sharpe proxy, tier, liquidity, forward return |
+| **Broker** | Each top broker’s buy/sell on this symbol, wash/circular churn |
+| **LLM** | Short narratives from your metrics (no API per row — fast rules) |
+
+**Skip** = no data that day (e.g. broker 101 had no trade in NGPL). **OK** = scored.  
+**Logic graph** below = audit trail: symbol → pipeline steps → brokers → final caution label.
+                    """
+                )
+            st.caption(
+                f"Agent fleet: **{fs['total']}** agents "
+                f"(quant {fs['quant']}, financial {fs['financial']}, broker {fs['broker']}, LLM {fs['llm']})"
+            )
+            if st.button(f"Deploy {fs['total']} agents (parallel)", key=f"btn_swarm_{sym}"):
+                with st.spinner(f"Running {fs['total']} agents — quant · financial · broker · LLM…"):
+                    st.session_state[f"swarm_result_{sym}"] = run_analysis_swarm(
+                        sym, row, sym_panel, broker_panel, universe_df, features=features
                     )
-            swarm = st.session_state.get(f"swarm_{sym}")
+            swarm = st.session_state.get(f"swarm_result_{sym}")
             if swarm:
+                fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+                fc1.metric("Agents run", swarm.get("agent_count", "—"))
+                fc2.metric("Fleet composite", f"{swarm.get('composite_score', 0):.0f}/100")
+                fc3.metric("Long consensus", f"{swarm.get('consensus_long_pct', 0):.0f}%")
+                fc4.metric("OK / err / skip", f"{swarm.get('ok_count', 0)}/{swarm.get('error_count', 0)}/{swarm.get('skip_count', 0)}")
+                dom = swarm.get("domain_scores") or {}
+                fc5.metric("Domains", f"Q{dom.get('quant', 0):.0f} F{dom.get('financial', 0):.0f} B{dom.get('broker', 0):.0f} L{dom.get('llm', 0):.0f}")
+
+                dcols = st.columns(4)
+                for i, d in enumerate(("quant", "financial", "broker", "llm")):
+                    score = float(dom.get(d, 0) or 0)
+                    sig = (swarm.get("domain_signals") or {}).get(d, "neutral")
+                    dcols[i].metric(
+                        d.title(),
+                        f"{score:.0f}/100",
+                        delta=str(sig),
+                        delta_color="normal" if sig == "neutral" else ("off" if sig == "bullish" else "inverse"),
+                    )
+
+                flat = swarm.get("agents_flat") or []
+                if flat:
+                    adf = pd.DataFrame(flat)
+                    domain_filter = st.selectbox("Filter agents by domain", ["all", "quant", "financial", "broker", "llm"], key=f"agent_dom_{sym}")
+                    if domain_filter != "all":
+                        adf = adf[adf["domain"] == domain_filter]
+                    st.dataframe(
+                        adf[["agent_id", "domain", "score", "signal", "status", "summary"]].head(120),
+                        hide_index=True,
+                        use_container_width=True,
+                        height=320,
+                    )
+
+                from frontend.knowledge_viz import _build_network_figure
+
                 g = LogicGraphStore().subgraph_symbol(sym)
-                st.caption(f"Logic graph: {len(g['nodes'])} nodes · {len(g['edges'])} edges")
-                if g["edges"]:
+                st.caption(f"Logic graph: {len(g['nodes'])} nodes · {len(g['edges'])} edges · saved to data/processed/logic_graph.json")
+                fig_kg = _build_network_figure(g, f"{sym} relationship graph")
+                if fig_kg:
+                    st.plotly_chart(fig_kg, use_container_width=True)
+                elif g["edges"]:
                     st.dataframe(pd.DataFrame(g["edges"]), hide_index=True, use_container_width=True)
+                st.caption("Full graph page: sidebar → **Knowledge Graph**")
 
     with tab_l:
         if not llm_status().get("ready"):

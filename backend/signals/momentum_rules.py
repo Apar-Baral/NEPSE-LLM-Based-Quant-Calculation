@@ -29,9 +29,10 @@ def assign_signal_tier(row: pd.Series) -> str:
     long_heavy = float(row.get("dist_3Y_power_score", 0) or 0) >= 2 and float(row.get("dist_1D_power_score", 3) or 3) >= 2
     if drs >= inv_drs and p < 0.40 and not shakeout and long_heavy:
         return "Invalidated"
-    if p >= conf_p and ems >= ems_thr * 1.1:
+    # Stricter Confirmed — needs strong effective scores, not turnover alone
+    if p >= max(conf_p, 0.55) and ems >= max(ems_thr * 1.5, 38) and rank >= 0.10:
         return "Confirmed"
-    if p >= trig_p and ems >= ems_thr * 0.85:
+    if p >= trig_p and ems >= ems_thr * 1.0 and (rank >= 0.08 or broker_p >= 20):
         return "Trigger"
     if dist_mode and broker_p >= cfg.get("dist_broker_pressure_trigger", 18) and rank >= 0.12:
         return "Trigger"

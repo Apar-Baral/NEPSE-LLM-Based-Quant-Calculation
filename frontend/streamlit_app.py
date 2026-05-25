@@ -91,9 +91,11 @@ inject_global_css()
 PAGES = [
     "Momentum Scanner",
     "Symbol Deep Dive",
+    "Knowledge Graph",
     "Model Lab",
     "Daily Upload",
     "Backtest",
+    "Data & Storage",
     "LLM Briefing",
     "Chat",
 ]
@@ -268,9 +270,13 @@ if page == "Momentum Scanner":
                 else:
                     st.warning(f"**{search_q.strip().upper()}** not in predictions — run pipeline after ingest.")
 
+        tier_counts = df["signal_tier"].value_counts().to_dict() if "signal_tier" in df.columns else {}
+        st.caption(f"Tier mix: {', '.join(f'{k}={v}' for k, v in sorted(tier_counts.items(), key=lambda x: -x[1]))}")
+
         display_cols = [
             "turnover_rank", "early_pick_rank", "symbol", "ltp", "daily_turnover_lac",
-            "signal_tier", "early_rank_score", "p_long_momentum", "broker_pressure",
+            "signal_tier", "early_rank_score", "p_long_momentum", "early_momentum_score",
+            "floorsheet_momentum_score", "broker_pressure",
             "top_broker_ids", "circular_risk", "circular_flag", "circular_confirmed",
             "wash_score", "directional_pct", "reciprocal_brokers",
             "distribution_risk_score", "llm_p_long", "llm_note",
@@ -408,6 +414,33 @@ if page == "Momentum Scanner":
             sent = check_trigger_alerts(df)
             st.write(f"Alerts sent for: {sent or 'none (configure webhook)'}")
 
+elif page == "Knowledge Graph":
+    from frontend.knowledge_viz import render_knowledge_graph_page
+
+    hero("Knowledge Graph", "Vector DB + logic relationships (MiroFish-style graph)")
+    dive_sym = st.session_state.get("dive_select", "")
+    render_knowledge_graph_page(symbol=dive_sym if dive_sym else None)
+
+elif page == "Data & Storage":
+    from frontend.knowledge_viz import storage_status
+
+    hero("Data & Storage", "Everything persisted under data/ — SQLite + parquet + graph + vectors")
+    stat = storage_status()
+    st.dataframe(pd.DataFrame(stat["rows"]), hide_index=True, use_container_width=True)
+    st.markdown(
+        """
+        **What gets saved when you run pipeline / upload:**
+        - **SQLite** `data/nepse_quant.db` — mirror of tables
+        - **Parquet** `data/processed/*.parquet` — source of truth (features, predictions, panels)
+        - **Logic graph** `logic_graph.json` — symbol ↔ brokers ↔ quant steps
+        - **Vectors** — ChromaDB folder `data/processed/chroma` + JSON fallback
+        - **Models** `data/models/` — LightGBM + multimodal weights
+        """
+    )
+    if st.button("Verify write test"):
+        n = store.save_panel(panel.tail(1), "symbol_panel") if not panel.empty else 0
+        st.success(f"Panel write OK ({n} rows sample). DB: {store.db_path}")
+
 elif page == "Model Lab":
     hero("Model Lab", "Self-learning multimodal stack trained on your floorsheet data")
     from backend.models.multimodal.architecture import torch_available
@@ -519,22 +552,61 @@ elif page == "Daily Upload":
             st.json(result)
 
 elif page == "Backtest":
-    hero("Backtest", "Historical tier entries · multi-day LTP from features + OHLCV")
+    from backend.backtest.engine import prepare_backtest_signals
+    from backend.quant.algorithms_catalog import ALGORITHM_SECTIONS
+
+    hero("Backtest", "Simulate entries when signal tier fires · exit after N days using LTP history")
     px_df = merge_ohlcv_sources(ohlcv, features)
+    sig_hist, sig_diag = prepare_backtest_signals(preds, features)
     st.caption(
         f"Price history: **{px_df['symbol'].nunique() if not px_df.empty else 0}** symbols · "
-        f"**{px_df['date'].nunique() if not px_df.empty else 0}** dates"
+        f"**{px_df['date'].nunique() if not px_df.empty else 0}** dates · "
+        f"Signal history: **{sig_diag.get('rows', 0)}** rows · **{sig_diag.get('dates', 0)}** dates "
+        f"({sig_diag.get('source', '—')})"
     )
-    tier = st.selectbox("Entry tier", ["Trigger", "Confirmed", "Setup"])
+    if sig_diag.get("tier_counts"):
+        st.markdown("**Tiers in signal history:** " + ", ".join(f"{k}={v}" for k, v in sig_diag["tier_counts"].items()))
+
+    with st.expander("Why ‘no Confirmed / Setup / Watch’?", expanded=True):
+        st.markdown(
+            """
+1. **Tiers are strict** — most names are **Neutral** or **Watch** after calibration (not a bug).  
+2. **Backtest needs history** — upload **multiple daily** Distribution/Accumulation files so `features` has **2+ report_date** per symbol.  
+3. **Entry filter** — if you pick only **Confirmed** but history has zero Confirmed rows, you get 0 trades. Use **Watch** or **Setup** or multi-select below.  
+4. **Prices** — each trade needs LTP on entry day **and** a later day; single-day uploads cannot fill trades.
+            """
+        )
+
+    with st.expander("Quant algorithms used in signals", expanded=False):
+        for sec in ALGORITHM_SECTIONS:
+            st.markdown(f"**{sec['title']}**")
+            for item in sec["items"]:
+                st.markdown(f"- {item}")
+
+    entry_tiers = st.multiselect(
+        "Entry tiers (any match)",
+        ["Watch", "Setup", "Trigger", "Confirmed"],
+        default=["Setup", "Trigger", "Confirmed"],
+        help="Include lower tiers if Confirmed count is 0 in your data.",
+    )
     hold = st.slider("Hold days", 3, 30, 10)
     if st.button("Run Backtest", type="primary"):
         with st.spinner("Simulating trades…"):
-            result = run_backtest(preds, ohlcv, entry_tier=tier, hold_days=hold, features=features)
+            result = run_backtest(
+                sig_hist if not sig_hist.empty else preds,
+                ohlcv,
+                entry_tier=entry_tiers[0] if entry_tiers else "Trigger",
+                hold_days=hold,
+                features=features,
+                entry_tiers=entry_tiers or None,
+            )
         st.session_state["backtest_result"] = result
     result = st.session_state.get("backtest_result")
     if result:
         if result.get("message") and result["message"] != "ok":
             st.warning(result["message"])
+        if result.get("tier_counts"):
+            st.caption(f"Filtered tiers: {result.get('tier_filter')} · matched entries: {result.get('entries_matched', '—')}")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Trades", result["trades"])
         c2.metric("Win Rate", f"{result['win_rate']:.0%}")

@@ -1,50 +1,32 @@
-"""Parallel analysis agents — volumetric, broker, momentum, knowledge indexing."""
+"""Agent fleet orchestrator — deploys 100+ quant · financial · broker · LLM agents."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
 
+from backend.agents.fleet import deploy_agent_fleet, fleet_status
 from backend.knowledge.graph_store import LogicGraphStore
 from backend.knowledge.vector_rag import VectorLogicRAG
-from backend.quant.engine import run_quant_analysis
-from backend.scanner.broker_top10 import discover_top_brokers, symbol_top_brokers_table
 
 
-def _agent_volumetric(sym: str, row: pd.Series, universe: pd.DataFrame | None) -> dict:
-    from backend.quant.volumetric import analyze_volume
-
-    return {"agent": "volumetric", "result": analyze_volume(row, universe)}
-
-
-def _agent_broker(sym: str, broker_panel: pd.DataFrame) -> dict:
-    table = symbol_top_brokers_table(sym, broker_panel)
-    top_ids = discover_top_brokers(broker_panel)
-    return {
-        "agent": "broker_top10",
-        "top_brokers": top_ids,
-        "table_rows": len(table),
-        "result": table.to_dict(orient="records") if not table.empty else [],
-    }
-
-
-def _agent_momentum(sym: str, row: pd.Series, panel_sym: pd.DataFrame, broker_panel: pd.DataFrame, universe) -> dict:
-    return {"agent": "quant_pipeline", "result": run_quant_analysis(sym, row, panel_sym, broker_panel, universe)}
-
-
-def _agent_index(sym: str, quant: dict) -> dict:
+def _index_knowledge(sym: str, fleet_report) -> dict:
+    quant = fleet_report.quant_pipeline or {}
     graph = LogicGraphStore()
-    graph.add_symbol_analysis(sym, quant.get("steps", []), tier=str(quant.get("verdict", "")))
+    graph.add_symbol_analysis(sym, quant.get("steps", []), tier=str(quant.get("verdict", fleet_report.domain_signals.get("quant", ""))))
+    if fleet_report.broker_table:
+        graph.add_broker_flow_edges(sym, fleet_report.broker_table)
     graph.save()
 
     rag = VectorLogicRAG()
-    chain = " -> ".join(f"{s['step']}:{s['score']}" for s in quant.get("steps", []))
+    chain = " | ".join(
+        f"{a.agent_id}:{a.score}" for a in fleet_report.agents[:40] if a.status == "ok"
+    )
     rag.index_logic_chain(
-        f"{sym}:latest",
-        f"{sym} early momentum logic chain: {chain}. Verdict: {quant.get('verdict')}",
-        {"symbol": sym, "composite": quant.get("composite_score", 0)},
+        f"{sym}:fleet",
+        f"{sym} agent fleet ({fleet_report.agent_count} agents): {chain}. Composite {fleet_report.composite_score}.",
+        {"symbol": sym, "composite": fleet_report.composite_score, "agents": fleet_report.agent_count},
     )
     rag.save_fallback()
     sub = graph.subgraph_symbol(sym)
@@ -57,33 +39,61 @@ def run_analysis_swarm(
     panel_sym: pd.DataFrame,
     broker_panel: pd.DataFrame,
     universe: pd.DataFrame | None = None,
+    features: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Run 4 agents in parallel; returns merged results."""
+    """
+    Deploy full agent fleet (≥100 agents) in parallel.
+    Returns legacy-compatible dict plus fleet report.
+    """
     sym = str(sym).strip().upper()
-    results: dict[str, Any] = {"symbol": sym, "agents": {}}
+    report = deploy_agent_fleet(sym, row, panel_sym, broker_panel, universe, features=features)
 
-    tasks = {
-        "volumetric": lambda: _agent_volumetric(sym, row, universe),
-        "broker": lambda: _agent_broker(sym, broker_panel),
-        "momentum": lambda: _agent_momentum(sym, row, panel_sym, broker_panel, universe),
+    knowledge = {}
+    try:
+        knowledge = _index_knowledge(sym, report)
+    except Exception as exc:
+        knowledge = {"error": str(exc)}
+
+    by_domain: dict[str, list] = {"quant": [], "financial": [], "broker": [], "llm": []}
+    for a in report.agents:
+        by_domain.setdefault(a.domain, []).append(
+            {
+                "agent_id": a.agent_id,
+                "name": a.name,
+                "score": a.score,
+                "signal": a.signal,
+                "status": a.status,
+                "summary": a.summary,
+            }
+        )
+
+    return {
+        "symbol": sym,
+        "fleet": report.to_dict(),
+        "fleet_status": fleet_status(),
+        "agent_count": report.agent_count,
+        "composite_score": report.composite_score,
+        "consensus_long_pct": report.consensus_long_pct,
+        "domain_scores": report.domain_scores,
+        "domain_signals": report.domain_signals,
+        "agents": by_domain,
+        "agents_flat": [
+            {
+                "agent_id": a.agent_id,
+                "domain": a.domain,
+                "name": a.name,
+                "score": a.score,
+                "signal": a.signal,
+                "status": a.status,
+                "summary": a.summary,
+            }
+            for a in report.agents
+        ],
+        "quant": report.quant_pipeline,
+        "broker_table": report.broker_table,
+        "knowledge": knowledge,
+        # Legacy keys
+        "ok_count": report.ok_count,
+        "error_count": report.error_count,
+        "skip_count": report.skip_count,
     }
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(fn): name for name, fn in tasks.items()}
-        for fut in as_completed(futures):
-            name = futures[fut]
-            try:
-                results["agents"][name] = fut.result()
-            except Exception as exc:
-                results["agents"][name] = {"error": str(exc)}
-
-    quant = results["agents"].get("momentum", {}).get("result", {})
-    if quant:
-        try:
-            results["agents"]["knowledge"] = _agent_index(sym, quant)
-        except Exception as exc:
-            results["agents"]["knowledge"] = {"error": str(exc)}
-
-    results["quant"] = quant
-    results["broker_table"] = results["agents"].get("broker", {}).get("result", [])
-    return results

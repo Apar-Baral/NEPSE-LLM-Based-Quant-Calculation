@@ -8,7 +8,7 @@ from backend.signals.effective_scores import effective_scores
 
 def analyze_momentum(row: pd.Series) -> dict:
     cfg = get_signal_config()
-    p_raw = float(row.get("p_long_momentum") or 0)
+    p_raw = float(row.get("p_long_momentum_raw") or row.get("p_long_momentum") or 0)
     p, ems, broker_p = effective_scores(row, cfg)
     fs = float(row.get("floorsheet_momentum_score") or 0)
     rank = float(row.get("early_rank_score") or 0)
