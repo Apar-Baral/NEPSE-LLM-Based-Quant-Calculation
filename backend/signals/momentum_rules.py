@@ -23,8 +23,10 @@ def _effective_scores(row: pd.Series, cfg: dict) -> tuple[float, float, float]:
     floorsheet = float(row.get("floorsheet_momentum_score", 0) or 0)
 
     if _distribution_mode(row, cfg):
-        p = max(p, rank * 0.55, broker_p / 200)
-        ems = max(ems, floorsheet, broker_p * 0.45, rank * 100 * 0.35)
+        turn = float(row.get("daily_turnover_lac") or 0)
+        turn_boost = min(0.22, turn / 1200) if turn > 0 else 0
+        p = max(p, rank * 0.72, broker_p / 200, 0.28 + turn_boost)
+        ems = max(ems, floorsheet, broker_p * 0.45, rank * 100 * 0.4, 12 + turn_boost * 80)
     elif rank > 0:
         p = max(p, rank * 0.25)
         ems = max(ems, rank * 100 * 0.2)

@@ -189,9 +189,11 @@ def symbol_to_metrics(row: pd.Series) -> dict:
         "distribution_risk_score", "mtf_convergence", "acc_dist_ratio",
         "demand_zone_distance_pct", "supply_zone_distance_pct", "ofi",
         "daily_volume", "daily_turnover_lac", "float_turnover_1d_abs", "volume_rank",
+        "turnover_rank", "early_pick_rank", "broker_pressure", "top_broker_ids",
+        "circular_risk", "circular_flag", "llm_p_long", "llm_note",
         "pattern_horizon_ladder", "pattern_dist_shakeout", "pattern_float_spike",
     ]
-    return {k: _serialize(row.get(k)) for k in keys if k in row.index or k in row}
+    return {k: _serialize(row.get(k)) for k in keys if k in row.index}
 
 
 def _serialize(v):
@@ -212,6 +214,17 @@ def generate_symbol_report(row: pd.Series) -> str:
     return _call_llm(prompt)
 
 
+def _prepare_scanner_df(scanner_df: pd.DataFrame) -> pd.DataFrame:
+    from backend.utils.numeric import coerce_numeric
+
+    df = coerce_numeric(scanner_df.copy())
+    if "p_long_momentum" in df.columns:
+        df["p_long_momentum"] = pd.to_numeric(df["p_long_momentum"], errors="coerce").fillna(0)
+    if "early_rank_score" in df.columns:
+        df["early_rank_score"] = pd.to_numeric(df["early_rank_score"], errors="coerce").fillna(0)
+    return df
+
+
 def generate_daily_brief(scanner_df: pd.DataFrame, top_n: int | None = None) -> str:
     if scanner_df.empty:
         return "No scanner data available for today."
@@ -219,9 +232,11 @@ def generate_daily_brief(scanner_df: pd.DataFrame, top_n: int | None = None) -> 
     cfg = load_yaml_config("settings.yaml").get("scanner", {})
     detail_n = top_n or cfg.get("brief_detail_n", 25)
 
-    # Expect scanner_df = top 120 high-volume universe already
-    ranked = scanner_df.sort_values("early_rank_score", ascending=False) if "early_rank_score" in scanner_df.columns else scanner_df
-    top = ranked.head(detail_n)
+    ranked = _prepare_scanner_df(scanner_df)
+    if "early_rank_score" in ranked.columns:
+        top = ranked.nlargest(detail_n, "early_rank_score")
+    else:
+        top = ranked.head(detail_n)
     summaries = [symbol_to_metrics(row) for _, row in top.iterrows()]
 
     vol_note = ""
@@ -239,16 +254,54 @@ def generate_daily_brief(scanner_df: pd.DataFrame, top_n: int | None = None) -> 
     return _call_llm(prompt)
 
 
-def chat_query(question: str, context_df: pd.DataFrame) -> str:
-    if "early_rank_score" in context_df.columns:
-        top = context_df.nlargest(120, "daily_volume" if "daily_volume" in context_df.columns else "early_rank_score")
-        top = top.nlargest(40, "early_rank_score")
+def _extract_symbols_from_question(question: str, known_symbols: list[str]) -> list[str]:
+    import re
+
+    q = question.upper()
+    known = {s.upper() for s in known_symbols}
+    found = []
+    for sym in sorted(known, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(sym)}\b", q):
+            found.append(sym)
+    tokens = re.findall(r"\b[A-Z]{2,12}\b", q)
+    for t in tokens:
+        if t in known and t not in found:
+            found.append(t)
+    return found
+
+
+def chat_query(
+    question: str,
+    context_df: pd.DataFrame,
+    extra_rows: pd.DataFrame | None = None,
+) -> str:
+    ctx = _prepare_scanner_df(context_df)
+    if extra_rows is not None and not extra_rows.empty:
+        extra = _prepare_scanner_df(extra_rows)
+        ctx = pd.concat([extra, ctx], ignore_index=True).drop_duplicates(subset=["symbol"], keep="first")
+
+    known = ctx["symbol"].astype(str).str.upper().tolist() if "symbol" in ctx.columns else []
+    asked = _extract_symbols_from_question(question, known)
+
+    if asked:
+        focus = ctx[ctx["symbol"].astype(str).str.upper().isin(asked)]
+        rest = ctx[~ctx["symbol"].astype(str).str.upper().isin(asked)]
+        if "early_rank_score" in rest.columns:
+            rest = rest.nlargest(min(15, len(rest)), "early_rank_score")
+        top = pd.concat([focus, rest], ignore_index=True).head(45)
+    elif "early_rank_score" in ctx.columns:
+        top = ctx.nlargest(min(40, len(ctx)), "early_rank_score")
+    elif "daily_turnover_lac" in ctx.columns:
+        top = ctx.nlargest(min(40, len(ctx)), "daily_turnover_lac")
     else:
-        top = context_df.nlargest(30, "p_long_momentum")
-    ctx = [symbol_to_metrics(r) for _, r in top.iterrows()]
+        top = ctx.head(30)
+
+    metrics = [symbol_to_metrics(r) for _, r in top.iterrows()]
+    focus_note = f"User asked about: {', '.join(asked)}. Prioritize these symbols.\n" if asked else ""
     prompt = (
         f"User question: {question}\n\n"
-        f"Context: top high-volume NEPSE symbols ranked for early long momentum.\n"
-        f"Available symbol metrics:\n{json.dumps(ctx, indent=2)}"
+        f"{focus_note}"
+        f"Context: NEPSE high-volume early long momentum scanner.\n"
+        f"Symbol metrics (JSON):\n{json.dumps(metrics, indent=2)}"
     )
     return _call_llm(prompt)

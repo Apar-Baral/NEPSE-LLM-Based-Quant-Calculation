@@ -11,6 +11,7 @@ from backend.features.pattern_library import build_pattern_store, enrich_with_an
 from backend.scanner.broker_insights import attach_broker_metrics
 from backend.scanner.volume_universe import attach_volume_from_panel, compute_early_rank_score, get_latest_scanner_universe
 from backend.ingest.backfill import backfill_accumulation_data, backfill_distribution_data
+from backend.ingest.broker_loader import backfill_broker_panel_from_data, load_excel_broker_detail
 from backend.ingest.panel_utils import snapshot_panel_all_horizons
 from backend.ingest.excel_loader import load_excel_workbook
 from backend.ingest.ohlcv_loader import build_ltp_proxy_from_panel, load_ohlcv_csv
@@ -18,6 +19,7 @@ from backend.ingest.ohlcv_loader import build_ltp_proxy_from_panel, load_ohlcv_c
 from backend.llm.rag import SimpleRAG
 from backend.models.labels import build_labels
 from backend.models.trainer import predict, train_models
+from backend.models.multimodal.train import train_multimodal
 from backend.signals.momentum_rules import apply_momentum_rules
 from backend.signals.universe_tiers import assign_universe_tiers
 
@@ -61,6 +63,19 @@ def run_pipeline(
         panel = existing_panel  # skip re-importing legacy CSVs on every run
 
     full_panel = snapshot_panel_all_horizons(store.load_panel())
+
+    broker_frames = []
+    if acc_path and acc_path.exists():
+        broker_frames.append(load_excel_broker_detail(acc_path, report_date=rd))
+    if dist_path and dist_path.exists():
+        broker_frames.append(load_excel_broker_detail(dist_path, report_date=rd))
+    if broker_frames:
+        store.append_broker_panel(pd.concat(broker_frames, ignore_index=True))
+    elif store.load_broker_panel().empty:
+        bp = backfill_broker_panel_from_data()
+        if not bp.empty:
+            store.save_broker_panel(bp)
+
     features = build_daily_feature_matrix(full_panel)
     store.save_features(features)
 
@@ -77,16 +92,22 @@ def run_pipeline(
     build_pattern_store(features, labels)
 
     meta = {}
+    mm_meta = {}
+    broker_panel_stored = store.load_broker_panel()
     if retrain and labels["long_momentum_10d"].sum() > 0 and len(features) > 20:
         try:
             meta = train_models(features, labels)
         except Exception as exc:
             meta = {"error": str(exc)}
+        try:
+            mm_meta = train_multimodal(features, labels, broker_panel_stored)
+        except Exception as exc:
+            mm_meta = {"error": str(exc)}
 
     latest_date = features["report_date"].max()
     latest_features = features[features["report_date"] == latest_date].copy()
     latest_features = attach_volume_from_panel(latest_features, full_panel)
-    predictions = predict(latest_features)
+    predictions = predict(latest_features, broker_panel=broker_panel_stored)
     predictions = enrich_with_analogs(predictions)
     signals = apply_momentum_rules(latest_features, predictions)
     signals = attach_volume_from_panel(signals, full_panel)
@@ -105,4 +126,5 @@ def run_pipeline(
         "symbols": int(signals["symbol"].nunique()),
         "trigger_count": int(signals[signals["signal_tier"].isin(["Trigger", "Confirmed"])].shape[0]),
         "model_meta": meta,
+        "multimodal_meta": mm_meta,
     }

@@ -130,9 +130,40 @@ def select_high_volume_universe(
     return out.sort_values("early_rank_score", ascending=False)
 
 
+def attach_ltp_from_panel(
+    df: pd.DataFrame,
+    panel: pd.DataFrame,
+    broker_panel: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    out = df.copy()
+    out["ltp"] = pd.to_numeric(out.get("ltp"), errors="coerce")
+    fills: dict[str, float] = {}
+
+    sources = [panel]
+    if broker_panel is not None and not broker_panel.empty:
+        sources.append(broker_panel)
+    for source in sources:
+        if source.empty or "ltp" not in source.columns:
+            continue
+        for sym, grp in source.groupby("symbol"):
+            if sym in fills:
+                continue
+            vals = pd.to_numeric(grp["ltp"], errors="coerce").dropna()
+            if len(vals):
+                fills[str(sym)] = float(vals.iloc[-1])
+
+    if fills:
+        fill_df = pd.DataFrame({"symbol": list(fills.keys()), "ltp_fill": list(fills.values())})
+        out = out.merge(fill_df, on="symbol", how="left")
+        out["ltp"] = out["ltp"].fillna(pd.to_numeric(out["ltp_fill"], errors="coerce"))
+        out.drop(columns=["ltp_fill"], inplace=True, errors="ignore")
+    return out
+
+
 def get_latest_scanner_universe(
     predictions: pd.DataFrame,
     panel: pd.DataFrame | None = None,
+    broker_panel: pd.DataFrame | None = None,
     top_n: int | None = None,
 ) -> pd.DataFrame:
     if predictions.empty:
@@ -142,22 +173,31 @@ def get_latest_scanner_universe(
     day = predictions[predictions["report_date"] == latest].copy()
     p = snapshot_panel_all_horizons(panel if panel is not None else pd.DataFrame())
     day = attach_volume_from_panel(day, p)
+    day = attach_ltp_from_panel(day, p, broker_panel)
     day = attach_broker_metrics(day, p)
     out = select_high_volume_universe(day, top_n=top_n)
     if not out.empty:
+        from backend.scanner.broker_desk import attach_broker_desk_metrics
         from backend.scanner.llm_cache import apply_cached_llm_scores
         from backend.signals.universe_tiers import assign_universe_tiers
+        from backend.utils.numeric import coerce_numeric
+
+        if broker_panel is not None and not broker_panel.empty:
+            out = attach_broker_desk_metrics(out, broker_panel)
 
         try:
             out = apply_cached_llm_scores(out)
         except Exception:
-            pass  # scanner works without LLM cache
+            pass
         out["early_rank_score"] = compute_early_rank_score(out)
-        out = out.sort_values("early_rank_score", ascending=False)
-        out["volume_rank"] = range(1, len(out) + 1)
+        out = coerce_numeric(out.sort_values("early_rank_score", ascending=False))
+        out["early_pick_rank"] = range(1, len(out) + 1)
+        out["turnover_rank"] = out["volume_rank"]
         out["signal_tier"] = assign_universe_tiers(out)
         if "llm_p_long" in out.columns:
-            out["p_long_momentum"] = out["llm_p_long"].fillna(out["p_long_momentum"])
+            out["p_long_momentum"] = pd.to_numeric(out["llm_p_long"], errors="coerce").fillna(
+                pd.to_numeric(out["p_long_momentum"], errors="coerce")
+            )
     return out
 
 

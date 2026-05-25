@@ -83,6 +83,23 @@ class DataStore:
         except Exception:
             return pd.DataFrame()
 
+    def save_broker_panel(self, df: pd.DataFrame) -> int:
+        return self.save_panel(df, "broker_panel")
+
+    def load_broker_panel(self) -> pd.DataFrame:
+        return self.load_panel("broker_panel")
+
+    def append_broker_panel(self, df: pd.DataFrame) -> int:
+        if df.empty:
+            return 0
+        existing = self.load_broker_panel()
+        df = df.copy()
+        df["report_date"] = pd.to_datetime(df["report_date"]).dt.normalize()
+        keys = ["report_date", "symbol", "horizon", "side", "broker_id"]
+        combined = pd.concat([existing, df], ignore_index=True) if not existing.empty else df
+        combined = combined.drop_duplicates(subset=keys, keep="last")
+        return self.save_broker_panel(combined)
+
     def latest_report_date(self) -> date | None:
         panel = self.load_panel()
         if panel.empty:

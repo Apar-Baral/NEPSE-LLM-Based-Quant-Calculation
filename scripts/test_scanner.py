@@ -31,17 +31,23 @@ def main() -> int:
         store = DataStore()
         preds = store.load_predictions()
         panel = store.load_panel()
+        broker_panel = store.load_broker_panel() if hasattr(store, "load_broker_panel") else store.load_panel("broker_panel")
         if preds.empty:
             print("WARN: no predictions — run: python scripts/run_pipeline.py")
             return 0
 
-        df = get_latest_scanner_universe(preds, panel=panel, top_n=10)
+        df = get_latest_scanner_universe(preds, panel=panel, broker_panel=broker_panel, top_n=10)
         if df.empty:
             errors.append("scanner returned empty dataframe")
         else:
             print("scanner rows:", len(df))
-            print(df[["symbol", "signal_tier", "daily_turnover_lac", "broker_pressure"]].head(5))
+            cols = [c for c in ("symbol", "turnover_rank", "early_pick_rank", "signal_tier", "daily_turnover_lac", "ltp", "broker_pressure") if c in df.columns]
+            print(df[cols].head(5))
             print("tiers:", df["signal_tier"].value_counts().to_dict())
+            from backend.llm.analyst import _prepare_scanner_df
+            ranked = _prepare_scanner_df(df)
+            ranked.nlargest(3, "early_rank_score")
+            print("nlargest early_rank: OK")
     except Exception as e:
         import traceback
         errors.append(str(e))

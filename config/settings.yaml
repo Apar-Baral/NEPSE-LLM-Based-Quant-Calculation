@@ -21,12 +21,29 @@ ml:
   random_state: 42
   top_k_scanner: 20
 
+multimodal:
+  epochs: 40
+  learning_rate: 0.001
+  batch_size: 64
+  max_training_samples: 8000
+  blend_weight: 0.5  # mm_p_long vs LightGBM in predict()
+
 scanner:
   high_volume_top_n: 120
   brief_detail_n: 25
   min_daily_volume: 0
   rank_by: daily_turnover_lac  # 1D floorsheet turnover only
   llm_score_max: 60
+  llm_refresh_max_fetch: 12  # max new LLM API calls per refresh (avoids hang)
+
+brokers:
+  watch_list: [58, 49, 45, 55, 34, 6, 38, 43, 70]
+  # Circular — universe-calibrated (not every stock)
+  circular_flag_percentile: 0.93
+  min_wash_score: 62
+  min_activity_qty: 8000
+  reciprocal_broker_min: 3
+  reciprocal_min_two_side_ratio: 0.30
 
 llm:
   provider: deepseek  # deepseek | openai | ollama

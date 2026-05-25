@@ -133,13 +133,13 @@ def train_models(features: pd.DataFrame, labels: pd.DataFrame) -> dict:
     return meta
 
 
-def predict(features: pd.DataFrame) -> pd.DataFrame:
+def predict(features: pd.DataFrame, broker_panel: pd.DataFrame | None = None) -> pd.DataFrame:
     clf_path = MODELS_DIR / "classifier.joblib"
     reg_path = MODELS_DIR / "regressor.joblib"
     cols_path = MODELS_DIR / "feature_cols.joblib"
 
     if not clf_path.exists():
-        return _heuristic_predictions(features)
+        return _heuristic_predictions(features, broker_panel)
 
     clf = joblib.load(clf_path)
     reg = joblib.load(reg_path) if reg_path.exists() else None
@@ -165,6 +165,7 @@ def predict(features: pd.DataFrame) -> pd.DataFrame:
         df["anomaly_score"] = scores
         df["anomaly_flag"] = if_model.predict(X) == -1
 
+    df = _blend_multimodal(df, broker_panel)
     df["confidence"] = pd.cut(
         df["p_long_momentum"],
         bins=[0, 0.4, 0.65, 1.0],
@@ -174,7 +175,23 @@ def predict(features: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _heuristic_predictions(features: pd.DataFrame) -> pd.DataFrame:
+def _blend_multimodal(df: pd.DataFrame, broker_panel: pd.DataFrame | None) -> pd.DataFrame:
+    try:
+        from backend.models.multimodal.predict import predict_multimodal
+
+        mm = predict_multimodal(df, broker_panel)
+        if "mm_p_long" in mm.columns and mm["mm_p_long"].notna().any():
+            base = pd.to_numeric(df["p_long_momentum"], errors="coerce").fillna(0.3)
+            mm_p = pd.to_numeric(mm["mm_p_long"], errors="coerce")
+            df["p_long_momentum"] = (0.5 * mm_p + 0.5 * base).clip(0, 1)
+            df["mm_p_long"] = mm_p
+            df["multimodal_blend"] = True
+    except Exception:
+        pass
+    return df
+
+
+def _heuristic_predictions(features: pd.DataFrame, broker_panel: pd.DataFrame | None = None) -> pd.DataFrame:
     """Fallback when no trained model exists."""
     df = features.copy()
     ems = df.get("early_momentum_score", pd.Series(0, index=df.index)).fillna(0)
@@ -193,6 +210,7 @@ def _heuristic_predictions(features: pd.DataFrame) -> pd.DataFrame:
     else:
         df["p_long_momentum"] = ((ems * 0.6 + sms * 0.4) / 100 * (1 - drs / 200)).clip(0, 1)
     df["expected_return_10d"] = df["p_long_momentum"] * 10
+    df = _blend_multimodal(df, broker_panel)
     df["confidence"] = pd.cut(
         df["p_long_momentum"],
         bins=[0, 0.4, 0.65, 1.0],

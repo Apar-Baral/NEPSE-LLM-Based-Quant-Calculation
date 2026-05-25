@@ -7,6 +7,7 @@ import json
 import pandas as pd
 
 from backend.config import PROCESSED_DIR, load_yaml_config
+from backend.utils.numeric import coerce_numeric
 
 CACHE_PATH = PROCESSED_DIR / "llm_scanner_scores.json"
 
@@ -39,12 +40,13 @@ def apply_cached_llm_scores(universe: pd.DataFrame) -> pd.DataFrame:
         if sym not in cached_rows:
             continue
         c = cached_rows[sym]
-        out.at[idx, "llm_p_long"] = c.get("llm_p_long")
-        out.at[idx, "llm_tier"] = c.get("llm_tier")
-        out.at[idx, "llm_note"] = c.get("llm_note")
-        if sym in work_symbols:
-            if c.get("llm_p_long") is not None:
-                out.at[idx, "p_long_momentum"] = c.get("llm_p_long")
-            if c.get("llm_tier"):
-                out.at[idx, "signal_tier"] = c.get("llm_tier")
-    return out
+        if c.get("llm_p_long") is not None:
+            out.at[idx, "llm_p_long"] = float(c["llm_p_long"])
+        if c.get("llm_tier"):
+            out.at[idx, "llm_tier"] = str(c["llm_tier"])
+        if c.get("llm_note"):
+            out.at[idx, "llm_note"] = str(c["llm_note"])
+        if sym in work_symbols and c.get("llm_p_long") is not None:
+            out.at[idx, "p_long_momentum"] = float(c["llm_p_long"])
+
+    return coerce_numeric(out)
