@@ -11,7 +11,7 @@ from backend.scanner.volume_universe import (
     attach_volume_from_panel,
     compute_early_rank_score,
 )
-from backend.signals.momentum_rules import _effective_scores
+from backend.signals.effective_scores import effective_scores
 from backend.signals.universe_tiers import assign_universe_tiers
 from backend.utils.numeric import coerce_numeric
 
@@ -91,7 +91,7 @@ def enrich_symbol_row(
     row["early_rank_score"] = compute_early_rank_score(row)
     row = coerce_numeric(row)
     cfg = load_yaml_config("settings.yaml")["signals"]
-    p_eff, ems_eff, _ = _effective_scores(row.iloc[0], cfg)
+    p_eff, ems_eff, _ = effective_scores(row.iloc[0], cfg)
     row["p_long_momentum"] = p_eff
     row["early_momentum_score"] = ems_eff
     row["signal_tier"] = assign_universe_tiers(row)

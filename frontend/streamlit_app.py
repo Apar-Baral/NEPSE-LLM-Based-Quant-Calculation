@@ -16,6 +16,8 @@ _STALE_PREFIXES = (
     "backend.db.",
     "backend.backtest",
     "backend.llm",
+    "backend.quant",
+    "backend.signals",
 )
 for _mod in list(sys.modules):
     if _mod == "backend.scanner" or any(_mod.startswith(p) for p in _STALE_PREFIXES):

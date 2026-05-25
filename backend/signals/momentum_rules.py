@@ -3,46 +3,23 @@ from __future__ import annotations
 import pandas as pd
 
 from backend.config import load_yaml_config
+from backend.signals.effective_scores import distribution_mode, effective_scores
 
 TIER_ORDER = ("Invalidated", "Neutral", "Watch", "Setup", "Trigger", "Confirmed")
 
-
-def _distribution_mode(row: pd.Series, cfg: dict) -> bool:
-    if not cfg.get("distribution_mode", True):
-        return False
-    acc_power = float(row.get("acc_1D_power_score", 0) or 0)
-    acc_amt = float(row.get("acc_1D_net_amount", 0) or 0)
-    return acc_power < 1 and abs(acc_amt) < 1
-
-
-def _effective_scores(row: pd.Series, cfg: dict) -> tuple[float, float, float]:
-    p = float(row.get("p_long_momentum", 0) or 0)
-    ems = float(row.get("early_momentum_score", 0) or 0)
-    rank = float(row.get("early_rank_score", 0) or 0)
-    broker_p = float(row.get("broker_pressure", 0) or 0)
-    floorsheet = float(row.get("floorsheet_momentum_score", 0) or 0)
-
-    if _distribution_mode(row, cfg):
-        turn = float(row.get("daily_turnover_lac") or 0)
-        turn_boost = min(0.22, turn / 1200) if turn > 0 else 0
-        p = max(p, rank * 0.72, broker_p / 200, 0.28 + turn_boost)
-        ems = max(ems, floorsheet, broker_p * 0.45, rank * 100 * 0.4, 12 + turn_boost * 80)
-    elif rank > 0:
-        p = max(p, rank * 0.25)
-        ems = max(ems, rank * 100 * 0.2)
-
-    return p, ems, broker_p
+_distribution_mode = distribution_mode
+_effective_scores = effective_scores
 
 
 def assign_signal_tier(row: pd.Series) -> str:
     cfg = load_yaml_config("settings.yaml")["signals"]
-    p, ems, broker_p = _effective_scores(row, cfg)
+    p, ems, broker_p = effective_scores(row, cfg)
     drs = float(row.get("distribution_risk_score", 100) or 100)
     z = float(row.get("float_turnover_zscore", 0) or row.get("float_turnover_zscore_hv", 0) or 0)
     rank = float(row.get("early_rank_score", 0) or 0)
     shakeout = bool(row.get("dist_shakeout_flag", False) or row.get("pattern_dist_shakeout", False))
 
-    dist_mode = _distribution_mode(row, cfg)
+    dist_mode = distribution_mode(row, cfg)
     trig_p = cfg["dist_trigger_probability"] if dist_mode else cfg["trigger_probability"]
     conf_p = cfg["dist_confirmed_probability"] if dist_mode else cfg["confirmed_probability"]
     ems_thr = cfg["dist_early_momentum_score"] if dist_mode else cfg["early_momentum_score"]

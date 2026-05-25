@@ -3,13 +3,13 @@ from __future__ import annotations
 import pandas as pd
 
 from backend.config import load_yaml_config
-from backend.signals.momentum_rules import _effective_scores
+from backend.signals.effective_scores import effective_scores
 
 
 def analyze_momentum(row: pd.Series) -> dict:
     cfg = load_yaml_config("settings.yaml")["signals"]
     p_raw = float(row.get("p_long_momentum") or 0)
-    p, ems, broker_p = _effective_scores(row, cfg)
+    p, ems, broker_p = effective_scores(row, cfg)
     fs = float(row.get("floorsheet_momentum_score") or 0)
     rank = float(row.get("early_rank_score") or 0)
     mtf = float(row.get("mtf_convergence") or 0)
