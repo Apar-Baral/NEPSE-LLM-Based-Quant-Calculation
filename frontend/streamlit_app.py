@@ -118,17 +118,29 @@ if page == "Momentum Scanner":
             st.stop()
         latest = df["report_date"].max() if not df.empty else preds["report_date"].max()
         st.caption(
-            f"Report date: {latest.date()} | **{len(df)}** high-volume symbols "
-            f"(ranked by early long-momentum score)"
+            f"Report date: **{latest.date()}** | Universe: **{len(df)}** symbols | "
+            f"Ranked by **1D turnover (Lac)** then LLM + quant early-momentum score"
         )
+        if st.button("Refresh LLM scores (top 60)", help="Requires DeepSeek/OpenAI in .env"):
+            with st.spinner("LLM scoring..."):
+                from backend.scanner.llm_scorer import score_universe_with_llm
+
+                df = score_universe_with_llm(df, panel)
+                from backend.signals.momentum_rules import assign_universe_tiers
+
+                df["signal_tier"] = assign_universe_tiers(df)
+                if "llm_p_long" in df.columns:
+                    df["p_long_momentum"] = df["llm_p_long"].fillna(df["p_long_momentum"])
+            st.success("LLM scores updated (cached).")
 
         tiers_present = [t for t in TIER_ORDER if t in df["signal_tier"].unique()]
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Trigger+", int(df[df["signal_tier"].isin(["Trigger", "Confirmed"])].shape[0]))
         c2.metric("Setup", int(df[df["signal_tier"] == "Setup"].shape[0]))
         c3.metric("Watch", int(df[df["signal_tier"] == "Watch"].shape[0]))
-        c4.metric("Top Pick", df.iloc[0]["symbol"] if len(df) else "—")
-        c5.metric("Top Early Rank", f"{float(df.iloc[0].get('early_rank_score', 0) or 0):.0%}" if len(df) else "—")
+        top_turn = df.sort_values("daily_turnover_lac", ascending=False).iloc[0] if "daily_turnover_lac" in df.columns and len(df) else df.iloc[0] if len(df) else None
+        c4.metric("Top 1D Turnover", top_turn["symbol"] if top_turn is not None else "—")
+        c5.metric("Top Early Pick", df.iloc[0]["symbol"] if len(df) else "—")
 
         with st.expander("Signal tier guide", expanded=False):
             for t in tiers_present:
@@ -149,7 +161,7 @@ if page == "Momentum Scanner":
             "volume_rank", "symbol", "ltp", "daily_volume", "daily_turnover_lac",
             "early_rank_score", "signal_tier", "p_long_momentum", "expected_return_10d",
             "early_momentum_score", "broker_pressure", "distribution_risk_score",
-            "float_turnover_1d_abs", "analog_hit_rate",
+            "float_turnover_1d_abs", "llm_p_long", "llm_note",
         ]
         for canonical in ("early_momentum_score", "distribution_risk_score", "ltp", "early_rank_score", "broker_pressure"):
             if canonical not in df.columns:
@@ -161,45 +173,53 @@ if page == "Momentum Scanner":
             hide_index=True,
         )
 
-        tab1, tab2, tab3 = st.tabs(["Early momentum map", "Broker pressure", "Tier breakdown"])
+        tab1, tab2, tab3 = st.tabs(["Setup map", "Broker pressure (1D–1W)", "Tier breakdown"])
         plot_df = df.copy()
-        plot_df["early_rank_pct"] = _col(plot_df, "early_rank_score") * 100
-        plot_df["broker_pressure"] = _col(plot_df, "broker_pressure")
-        plot_df["early_momentum_score"] = _col(plot_df, "early_momentum_score")
+        plot_df["early_rank_pct"] = (_col(plot_df, "early_rank_score") * 100).round(1)
+        plot_df["broker_pressure"] = _col(plot_df, "broker_pressure").round(1)
+        p_long = _col(plot_df, "p_long_momentum")
+        if "llm_p_long" in plot_df.columns:
+            p_long = plot_df["llm_p_long"].fillna(p_long)
+        plot_df["p_long_pct"] = (pd.to_numeric(p_long, errors="coerce").fillna(0) * 100).round(1)
 
         with tab1:
+            st.markdown("**X** = LLM/quant P(long) · **Y** = composite early rank · size = 1D turnover")
             fig_map = px.scatter(
                 plot_df,
-                x="early_momentum_score",
+                x="p_long_pct",
                 y="early_rank_pct",
                 color="signal_tier",
                 color_discrete_map=_tier_color_scale(),
                 hover_name="symbol",
-                size="daily_volume" if "daily_volume" in plot_df.columns else None,
+                size="daily_turnover_lac" if "daily_turnover_lac" in plot_df.columns else None,
                 labels={
-                    "early_momentum_score": "Early momentum (0–100)",
-                    "early_rank_pct": "Early rank score (%)",
+                    "p_long_pct": "P(long 10D) %",
+                    "early_rank_pct": "Early rank %",
                     "signal_tier": "Signal",
-                    "daily_volume": "Daily qty",
+                    "daily_turnover_lac": "1D turnover (Lac)",
                 },
-                title="Early momentum vs rank (top 120 volume)",
+                title="Actionable setups — probability vs early rank",
             )
             fig_map.update_layout(legend_title_text="Signal")
             st.plotly_chart(fig_map, use_container_width=True)
 
         with tab2:
-            top_b = plot_df.nlargest(25, "broker_pressure")
-            fig_b = px.bar(
-                top_b.sort_values("broker_pressure"),
-                x="broker_pressure",
-                y="symbol",
-                orientation="h",
-                color="signal_tier",
-                color_discrete_map=_tier_color_scale(),
-                labels={"broker_pressure": "Broker pressure (0–100)", "symbol": "Symbol"},
-                title="Short-horizon broker buy/sell skew (top 25)",
-            )
-            st.plotly_chart(fig_b, use_container_width=True)
+            top_b = plot_df[plot_df["broker_pressure"] > 0].nlargest(25, "broker_pressure")
+            if top_b.empty:
+                st.warning("Broker pressure is zero — click **Run Pipeline** then **Refresh LLM scores**.")
+            else:
+                fig_b = px.bar(
+                    top_b.sort_values("broker_pressure"),
+                    x="broker_pressure",
+                    y="symbol",
+                    orientation="h",
+                    color="signal_tier",
+                    color_discrete_map=_tier_color_scale(),
+                    labels={"broker_pressure": "Broker pressure (0–100)", "symbol": "Symbol"},
+                    title="Short-horizon broker buy/sell skew (1D–1W)",
+                )
+                fig_b.update_xaxes(range=[0, 100])
+                st.plotly_chart(fig_b, use_container_width=True)
 
         with tab3:
             tier_counts = plot_df["signal_tier"].value_counts().reindex(tiers_present).dropna()
@@ -299,8 +319,9 @@ elif page == "Symbol Deep Dive":
                     y="qty",
                     color="side",
                     barmode="group",
-                    labels={"qty": "Quantity", "horizon": "Horizon"},
-                    title=f"{sym} — 1D–1W broker buy vs sell qty",
+                    category_orders={"horizon": ["1D", "2D", "3D", "4D", "1W"]},
+                    labels={"qty": "Quantity (1D–1W)", "horizon": "Horizon"},
+                    title=f"{sym} — Short-horizon broker buy vs sell qty",
                 )
                 st.plotly_chart(fig_broker, use_container_width=True)
 
@@ -371,6 +392,15 @@ elif page == "Daily Upload":
 
 elif page == "Backtest":
     st.header("Backtest — Trigger Tier")
+    st.markdown(
+        """
+        **How it works:** Takes symbols from your saved predictions with tier **Trigger** or **Confirmed**,
+        enters at the **report date close** (LTP proxy from floorsheet if no OHLCV CSV),
+        exits after **N hold days**, and reports win rate / average return.
+        Requires historical signal dates + OHLCV — with a single-day upload, trade count may be **0**.
+        Upload daily Excel over time or add OHLCV CSV for meaningful backtests.
+        """
+    )
     tier = st.selectbox("Entry tier", ["Trigger", "Confirmed", "Setup"])
     hold = st.slider("Hold days", 3, 30, 10)
     if st.button("Run Backtest") or not ohlcv.empty:

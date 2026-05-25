@@ -181,9 +181,15 @@ def _heuristic_predictions(features: pd.DataFrame) -> pd.DataFrame:
     sms = df.get("smart_money_score", pd.Series(0, index=df.index)).fillna(0)
     drs = df.get("distribution_risk_score", pd.Series(0, index=df.index)).fillna(0)
     # Distribution-only fallback: use inverse distribution risk + float z-score
-    if "acc_horizon_score" not in df.columns or df["acc_horizon_score"].fillna(0).sum() == 0:
+    fs = df.get("floorsheet_momentum_score", pd.Series(0, index=df.index)).fillna(0)
+    broker = df.get("broker_pressure", pd.Series(0, index=df.index)).fillna(0)
+    acc_sum = df.get("acc_horizon_score", pd.Series(0, index=df.index)).fillna(0).sum() if "acc_horizon_score" in df.columns else 0
+    if acc_sum == 0:
         ft_z = df.get("float_turnover_zscore", pd.Series(0, index=df.index)).fillna(0).clip(0, 3) / 3
-        df["p_long_momentum"] = ((1 - drs / 100) * 0.3 + ft_z * 0.2).clip(0, 0.5)
+        shakeout = df.get("pattern_dist_shakeout", pd.Series(False, index=df.index)).fillna(False).astype(float)
+        df["p_long_momentum"] = (
+            (ems * 0.35 + fs * 0.25 + broker * 0.2) / 100 + ft_z * 0.15 + shakeout * 0.1
+        ).clip(0.08, 0.85) * (1 - drs / 250)
     else:
         df["p_long_momentum"] = ((ems * 0.6 + sms * 0.4) / 100 * (1 - drs / 200)).clip(0, 1)
     df["expected_return_10d"] = df["p_long_momentum"] * 10

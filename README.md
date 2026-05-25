@@ -8,6 +8,8 @@
 
 **Author:** [Apar-Baral](https://github.com/Apar-Baral) · dedsecaparb@gmail.com
 
+**Repository:** [NEPSE-LLM-Based-Quant-Calculation](https://github.com/Apar-Baral/NEPSE-LLM-Based-Quant-Calculation)
+
 ---
 
 ## What it does

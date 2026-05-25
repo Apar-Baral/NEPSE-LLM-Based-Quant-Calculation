@@ -25,6 +25,8 @@ scanner:
   high_volume_top_n: 120
   brief_detail_n: 25
   min_daily_volume: 0
+  rank_by: daily_turnover_lac  # 1D floorsheet turnover only
+  llm_score_max: 60
 
 llm:
   provider: deepseek  # deepseek | openai | ollama

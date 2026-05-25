@@ -18,7 +18,7 @@ from backend.ingest.ohlcv_loader import build_ltp_proxy_from_panel, load_ohlcv_c
 from backend.llm.rag import SimpleRAG
 from backend.models.labels import build_labels
 from backend.models.trainer import predict, train_models
-from backend.signals.momentum_rules import apply_momentum_rules, assign_signal_tier
+from backend.signals.momentum_rules import apply_momentum_rules, assign_universe_tiers
 
 
 def run_pipeline(
@@ -91,7 +91,8 @@ def run_pipeline(
     signals = attach_volume_from_panel(signals, full_panel)
     signals = attach_broker_metrics(signals, full_panel)
     signals["early_rank_score"] = compute_early_rank_score(signals)
-    signals["signal_tier"] = signals.apply(assign_signal_tier, axis=1)
+    signals = signals.sort_values("daily_turnover_lac", ascending=False)
+    signals["signal_tier"] = assign_universe_tiers(signals)
     store.save_predictions(signals)
 
     rag = SimpleRAG()

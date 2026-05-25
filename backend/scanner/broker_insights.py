@@ -38,14 +38,17 @@ def broker_pressure_score(sym_panel: pd.DataFrame) -> float:
 
 
 def horizon_net_flow(sym_panel: pd.DataFrame, side: str) -> pd.DataFrame:
-    """Per-horizon net amount (Lac) for acc or dist — comparable across horizons."""
+    """Per-horizon net amount (Lac) for acc or dist — short horizons only (1D–1W)."""
     if sym_panel.empty:
         return pd.DataFrame()
     sub = sym_panel[sym_panel["side"] == side].copy() if "side" in sym_panel.columns else sym_panel
     if sub.empty:
         return sub
+    if "horizon" in sub.columns:
+        sub = sub[sub["horizon"].isin(SHORT_HORIZONS)]
     sub = _horizon_sort(sub)
-    sub["net_lac"] = pd.to_numeric(sub.get("net_amount_sum", 0), errors="coerce").fillna(0) / 100_000
+    # Floorsheet net amounts are already in Lac-scale (not raw rupees)
+    sub["net_lac"] = pd.to_numeric(sub.get("net_amount_sum", 0), errors="coerce").fillna(0)
     sub["power"] = sub.get("dominant_power", "—")
     return sub[["horizon", "net_lac", "power", "buy_qty_sum", "sell_qty_sum"]].copy()
 

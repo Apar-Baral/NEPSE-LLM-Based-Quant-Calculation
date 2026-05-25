@@ -41,6 +41,8 @@ COLUMN_LABELS = {
     "confidence": "Confidence",
     "short_ofi": "Short OFI",
     "heavy_broker_share": "Heavy Broker %",
+    "llm_p_long": "LLM P(Long)",
+    "llm_note": "LLM Note",
 }
 
 

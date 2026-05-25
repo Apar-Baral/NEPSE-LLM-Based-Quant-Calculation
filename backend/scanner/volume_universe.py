@@ -6,9 +6,9 @@ import pandas as pd
 from backend.config import load_yaml_config
 from backend.scanner.broker_insights import attach_broker_metrics
 from backend.ingest.panel_utils import snapshot_panel_all_horizons
-from backend.signals.momentum_rules import assign_signal_tier
 
 VOLUME_COLS = ("daily_volume", "daily_turnover_lac", "float_turnover_1d_abs")
+SHORT_HORIZONS = ("1D", "2D", "3D", "4D", "1W")
 
 
 def _cfg() -> dict:
@@ -25,66 +25,51 @@ def _ensure_volume_cols(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _safe_sum(series: pd.Series) -> float:
-    return float(pd.to_numeric(series, errors="coerce").fillna(0).sum())
-
-
-def _safe_max(series: pd.Series) -> float:
-    return float(pd.to_numeric(series, errors="coerce").fillna(0).abs().max())
+def _short_horizon_rows(grp: pd.DataFrame, side: str | None = None) -> pd.DataFrame:
+    sub = grp.copy()
+    if side and "side" in sub.columns:
+        sub = sub[sub["side"] == side]
+    if "horizon" in sub.columns:
+        sub = sub[sub["horizon"].isin(SHORT_HORIZONS)]
+    return sub
 
 
 def attach_volume_from_panel(features: pd.DataFrame, panel: pd.DataFrame) -> pd.DataFrame:
-    """Add volume / turnover per symbol from floorsheet panel."""
+    """1D-only volume and turnover from distribution panel (trader-relevant)."""
     out = features.copy()
     out = out.drop(columns=[c for c in VOLUME_COLS if c in out.columns], errors="ignore")
 
     if panel.empty or "buy_qty_sum" not in panel.columns:
         return _ensure_volume_cols(out)
 
-    panel = panel.copy()
     rows = []
     for sym, grp in panel.groupby("symbol"):
-        buy = pd.to_numeric(grp["buy_qty_sum"], errors="coerce").fillna(0)
-        sell = (
-            pd.to_numeric(grp["sell_qty_sum"], errors="coerce").fillna(0)
-            if "sell_qty_sum" in grp.columns
-            else pd.Series(0.0, index=grp.index)
-        )
-        turnover = (
-            pd.to_numeric(grp["net_amount_sum"], errors="coerce").fillna(0).abs()
-            if "net_amount_sum" in grp.columns
-            else pd.Series(0.0, index=grp.index)
+        dist = _short_horizon_rows(grp, "distribution")
+        d1 = dist[dist["horizon"] == "1D"] if "horizon" in dist.columns else dist.head(1)
+        if d1.empty and not dist.empty:
+            d1 = dist.head(1)
+        if d1.empty:
+            d1 = grp[grp["horizon"] == "1D"] if "horizon" in grp.columns else grp.head(1)
+
+        buy = pd.to_numeric(d1["buy_qty_sum"], errors="coerce").fillna(0).sum() if not d1.empty else 0.0
+        sell = pd.to_numeric(d1["sell_qty_sum"], errors="coerce").fillna(0).sum() if not d1.empty else 0.0
+        net_amt = (
+            pd.to_numeric(d1["net_amount_sum"], errors="coerce").fillna(0).abs().sum()
+            if not d1.empty and "net_amount_sum" in d1.columns
+            else 0.0
         )
         ft = (
-            pd.to_numeric(grp["net_float_turnover_mean"], errors="coerce").fillna(0).abs()
-            if "net_float_turnover_mean" in grp.columns
-            else pd.Series(0.0, index=grp.index)
+            pd.to_numeric(d1["net_float_turnover_mean"], errors="coerce").fillna(0).abs().mean()
+            if not d1.empty and "net_float_turnover_mean" in d1.columns
+            else 0.0
         )
-
-        d1 = grp[grp["horizon"] == "1D"] if "horizon" in grp.columns else grp
-        if d1.empty:
-            d1 = grp
-
-        d1_buy = pd.to_numeric(d1["buy_qty_sum"], errors="coerce").fillna(0) if "buy_qty_sum" in d1.columns else pd.Series(0.0)
-        d1_sell = (
-            pd.to_numeric(d1["sell_qty_sum"], errors="coerce").fillna(0)
-            if "sell_qty_sum" in d1.columns
-            else pd.Series(0.0)
-        )
-
-        daily_vol = _safe_sum(d1_buy) + _safe_sum(d1_sell)
-        peak_vol = float(buy.max() + sell.max()) if len(buy) else daily_vol
 
         rows.append(
             {
                 "symbol": sym,
-                "daily_volume": max(daily_vol, peak_vol),
-                "daily_turnover_lac": _safe_max(turnover),
-                "float_turnover_1d_abs": _safe_max(
-                    pd.to_numeric(d1["net_float_turnover_mean"], errors="coerce").fillna(0).abs()
-                    if "net_float_turnover_mean" in d1.columns
-                    else ft
-                ),
+                "daily_volume": float(buy + sell),
+                "daily_turnover_lac": float(net_amt),
+                "float_turnover_1d_abs": float(ft),
             }
         )
 
@@ -98,34 +83,25 @@ def attach_volume_from_panel(features: pd.DataFrame, panel: pd.DataFrame) -> pd.
 
 def compute_early_rank_score(df: pd.DataFrame) -> pd.Series:
     df = _ensure_volume_cols(df)
+    llm_p = df.get("llm_p_long", df.get("p_long_momentum", pd.Series(0, index=df.index))).fillna(0)
     p = df.get("p_long_momentum", pd.Series(0, index=df.index)).fillna(0)
+    p = np.maximum(p, llm_p)
     ems = df.get("early_momentum_score", pd.Series(0, index=df.index)).fillna(0) / 100
-    sms = df.get("smart_money_score", pd.Series(0, index=df.index)).fillna(0) / 100
+    broker = df.get("broker_pressure", pd.Series(0, index=df.index)).fillna(0) / 100
     drs = df.get("distribution_risk_score", pd.Series(0, index=df.index)).fillna(0) / 100
-    z = df.get("float_turnover_zscore", pd.Series(0, index=df.index)).fillna(0).clip(0, 3) / 3
-    analog = df.get("analog_hit_rate", pd.Series(0, index=df.index)).fillna(0)
+    shakeout = df.get("dist_shakeout_flag", pd.Series(False, index=df.index)).fillna(False).astype(float)
 
-    dist_only_boost = pd.Series(0.0, index=df.index)
-    if sms.sum() == 0:
-        short_act = df["float_turnover_1d_abs"].fillna(0)
-        if short_act.max() > 0:
-            short_act = short_act / short_act.max()
-        long_dist = df.get("dist_3M_power_score", pd.Series(0, index=df.index)).fillna(0)
-        dist_only_boost = short_act * (1 - long_dist / 3) * 0.2
+    turn = df["daily_turnover_lac"].fillna(0)
+    turn_n = turn / (turn.max() + 1e-9) if turn.max() > 0 else turn
 
-    vol_boost = pd.Series(0.0, index=df.index)
-    if df["daily_volume"].max() > 0:
-        vol_boost = df["daily_volume"] / (df["daily_volume"].max() + 1e-9) * 0.1
-
-    return (p * 0.3 + ems * 0.2 + sms * 0.15 + z * 0.1 + analog * 0.1 + dist_only_boost + vol_boost - drs * 0.15).clip(0, 1)
-
-
-def _pick_volume_column(df: pd.DataFrame) -> str:
-    df = _ensure_volume_cols(df)
-    for col in ("daily_volume", "daily_turnover_lac", "float_turnover_1d_abs"):
-        if df[col].sum() > 0:
-            return col
-    return "daily_volume"
+    return (
+        p * 0.25
+        + ems * 0.2
+        + broker * 0.2
+        + turn_n * 0.15
+        + shakeout * 0.1
+        - drs * 0.1
+    ).clip(0, 1)
 
 
 def select_high_volume_universe(
@@ -138,12 +114,11 @@ def select_high_volume_universe(
     min_volume = min_volume or cfg.get("min_daily_volume", 0)
     out = _ensure_volume_cols(df.copy())
 
-    vol_col = _pick_volume_column(out)
-    out = out[out[vol_col] >= min_volume]
+    out = out[out["daily_turnover_lac"] >= min_volume]
     if out.empty:
         return out
 
-    out = out.sort_values(vol_col, ascending=False).head(top_n).copy()
+    out = out.sort_values("daily_turnover_lac", ascending=False).head(top_n).copy()
     out["volume_rank"] = range(1, len(out) + 1)
     out["early_rank_score"] = compute_early_rank_score(out)
 
@@ -170,22 +145,33 @@ def get_latest_scanner_universe(
     day = attach_broker_metrics(day, p)
     out = select_high_volume_universe(day, top_n=top_n)
     if not out.empty:
-        out["signal_tier"] = out.apply(assign_signal_tier, axis=1)
+        from backend.scanner.llm_scorer import score_universe_with_llm
+        from backend.signals.momentum_rules import assign_universe_tiers
+
+        out = score_universe_with_llm(out, p)
+        out["early_rank_score"] = compute_early_rank_score(out)
+        out = out.sort_values("early_rank_score", ascending=False)
+        out["volume_rank"] = range(1, len(out) + 1)
+        out["signal_tier"] = assign_universe_tiers(out)
+        if "llm_p_long" in out.columns:
+            out["p_long_momentum"] = out["llm_p_long"].fillna(out["p_long_momentum"])
     return out
 
 
 def symbol_horizon_snapshot(sym_panel: pd.DataFrame, side: str) -> pd.DataFrame:
-    """One row per horizon for a symbol (best for multi-horizon charts)."""
+    """One row per short horizon for a symbol."""
     if sym_panel.empty:
         return sym_panel
-    sub = sym_panel[sym_panel["side"] == side].copy()
+    sub = sym_panel[sym_panel["side"] == side].copy() if "side" in sym_panel.columns else sym_panel.copy()
     if sub.empty:
         return sub
-    if "horizon" not in sub.columns:
+    if "horizon" in sub.columns:
+        sub = sub[sub["horizon"].isin(SHORT_HORIZONS)]
+    if sub.empty or "horizon" not in sub.columns:
         return sub
     sub["abs_net"] = pd.to_numeric(sub.get("net_amount_sum", 0), errors="coerce").fillna(0).abs()
     sub = sub.sort_values("abs_net", ascending=False).drop_duplicates(subset=["horizon"], keep="first")
     order = load_yaml_config("horizons.yaml")["horizons"]
-    order_map = {h["key"]: h["order"] for h in order}
+    order_map = {h["key"]: h["order"] for h in order if h["key"] in SHORT_HORIZONS}
     sub["horizon_order"] = sub["horizon"].map(order_map).fillna(99)
     return sub.sort_values("horizon_order")
