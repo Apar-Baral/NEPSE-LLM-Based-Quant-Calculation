@@ -125,7 +125,7 @@ if page == "Momentum Scanner":
             with st.spinner("LLM scoring..."):
                 from backend.scanner.llm_scorer import score_universe_with_llm
 
-                df = score_universe_with_llm(df, panel)
+                df = score_universe_with_llm(df, panel, fetch_new=True)
                 from backend.signals.momentum_rules import assign_universe_tiers
 
                 df["signal_tier"] = assign_universe_tiers(df)

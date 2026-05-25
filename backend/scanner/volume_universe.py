@@ -148,7 +148,7 @@ def get_latest_scanner_universe(
         from backend.scanner.llm_scorer import score_universe_with_llm
         from backend.signals.momentum_rules import assign_universe_tiers
 
-        out = score_universe_with_llm(out, p)
+        out = score_universe_with_llm(out, p, fetch_new=False)
         out["early_rank_score"] = compute_early_rank_score(out)
         out = out.sort_values("early_rank_score", ascending=False)
         out["volume_rank"] = range(1, len(out) + 1)

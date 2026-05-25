@@ -71,6 +71,7 @@ def score_universe_with_llm(
     panel: pd.DataFrame,
     batch_size: int = 12,
     max_symbols: int | None = None,
+    fetch_new: bool = True,
 ) -> pd.DataFrame:
     """Attach llm_p_long, llm_tier, llm_note from DeepSeek/OpenAI (cached)."""
     out = universe.copy()
@@ -98,11 +99,12 @@ def score_universe_with_llm(
     cached_rows = cache.get(cache_key, {})
 
     pending = []
-    for _, row in work.iterrows():
-        sym = row["symbol"]
-        if sym in cached_rows:
-            continue
-        pending.append(_symbol_brief(row, panel))
+    if fetch_new:
+        for _, row in work.iterrows():
+            sym = row["symbol"]
+            if sym in cached_rows:
+                continue
+            pending.append(_symbol_brief(row, panel))
 
     for i in range(0, len(pending), batch_size):
         batch = pending[i : i + batch_size]
