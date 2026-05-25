@@ -39,7 +39,9 @@ def storage_status() -> dict:
     for name, path, ok in items:
         size = path.stat().st_size if ok and path.is_file() else 0
         rows.append({"Store": name, "Path": str(path), "Saved": "Yes" if ok else "No", "Size": f"{size / 1024:.1f} KB" if size else "—"})
-    return {"rows": rows, "all_core": ok for _, p, ok in items[:5] if "Chroma" not in str(p)}
+    core_items = [(n, p, ok) for n, p, ok in items if "Chroma" not in n]
+    all_core = all(ok for _, _, ok in core_items) if core_items else False
+    return {"rows": rows, "all_core": all_core}
 
 
 def _build_network_figure(sub: dict, title: str) -> go.Figure | None:
