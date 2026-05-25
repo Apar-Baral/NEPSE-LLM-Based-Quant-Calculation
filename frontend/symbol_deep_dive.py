@@ -324,10 +324,17 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                 f"Agent fleet: **{fs['total']}** agents "
                 f"(quant {fs['quant']}, financial {fs['financial']}, broker {fs['broker']}, LLM {fs['llm']})"
             )
+            use_llm_graph = st.checkbox(
+                "LLM association edges in knowledge graph",
+                value=False,
+                key=f"llm_graph_{sym}",
+                help="Adds DeepSeek-derived cross-links when API key is set",
+            )
             if st.button(f"Deploy {fs['total']} agents (parallel)", key=f"btn_swarm_{sym}"):
-                with st.spinner(f"Running {fs['total']} agents — quant · financial · broker · LLM…"):
+                with st.spinner(f"Running {fs['total']} agents — comprehensive knowledge graph…"):
                     st.session_state[f"swarm_result_{sym}"] = run_analysis_swarm(
-                        sym, row, sym_panel, broker_panel, universe_df, features=features
+                        sym, row, sym_panel, broker_panel, universe_df,
+                        features=features, use_llm_graph=use_llm_graph,
                     )
             swarm = st.session_state.get(f"swarm_result_{sym}")
             if swarm:
@@ -363,16 +370,20 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                         height=320,
                     )
 
-                from frontend.knowledge_viz import _build_network_figure
+                from frontend.knowledge_viz import build_comprehensive_figure
+                from backend.knowledge.comprehensive_graph import subgraph_for_symbol
 
-                g = LogicGraphStore().subgraph_symbol(sym)
-                st.caption(f"Logic graph: {len(g['nodes'])} nodes · {len(g['edges'])} edges · saved to data/processed/logic_graph.json")
-                fig_kg = _build_network_figure(g, f"{sym} relationship graph")
+                g = subgraph_for_symbol(sym, depth=2)
+                st.caption(
+                    f"Comprehensive graph: **{len(g['nodes'])}** nodes · **{len(g['edges'])}** edges "
+                    f"(agents, metrics, domains, brokers, LLM links)"
+                )
+                fig_kg = build_comprehensive_figure(g, f"{sym} — comprehensive knowledge")
                 if fig_kg:
                     st.plotly_chart(fig_kg, use_container_width=True)
                 elif g["edges"]:
                     st.dataframe(pd.DataFrame(g["edges"]), hide_index=True, use_container_width=True)
-                st.caption("Full graph page: sidebar → **Knowledge Graph**")
+                st.caption("Open sidebar → **Knowledge Graph** for full interactive graph + vector search.")
 
     with tab_l:
         if not llm_status().get("ready"):

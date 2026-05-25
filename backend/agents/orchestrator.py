@@ -7,30 +7,28 @@ from typing import Any
 import pandas as pd
 
 from backend.agents.fleet import deploy_agent_fleet, fleet_status
-from backend.knowledge.graph_store import LogicGraphStore
-from backend.knowledge.vector_rag import VectorLogicRAG
+from backend.knowledge.comprehensive_graph import build_comprehensive_knowledge, subgraph_for_symbol
+from backend.llm.analyst import llm_status
 
 
-def _index_knowledge(sym: str, fleet_report) -> dict:
+def _index_knowledge(sym: str, fleet_report, row: pd.Series, use_llm: bool = False) -> dict:
     quant = fleet_report.quant_pipeline or {}
-    graph = LogicGraphStore()
-    graph.add_symbol_analysis(sym, quant.get("steps", []), tier=str(quant.get("verdict", fleet_report.domain_signals.get("quant", ""))))
-    if fleet_report.broker_table:
-        graph.add_broker_flow_edges(sym, fleet_report.broker_table)
-    graph.save()
-
-    rag = VectorLogicRAG()
-    chain = " | ".join(
-        f"{a.agent_id}:{a.score}" for a in fleet_report.agents[:40] if a.status == "ok"
+    use_llm = use_llm or llm_status().get("ready", False)
+    build_comprehensive_knowledge(
+        sym,
+        row,
+        fleet_report,
+        quant_pipeline=quant,
+        use_llm_associations=use_llm,
     )
-    rag.index_logic_chain(
-        f"{sym}:fleet",
-        f"{sym} agent fleet ({fleet_report.agent_count} agents): {chain}. Composite {fleet_report.composite_score}.",
-        {"symbol": sym, "composite": fleet_report.composite_score, "agents": fleet_report.agent_count},
-    )
-    rag.save_fallback()
-    sub = graph.subgraph_symbol(sym)
-    return {"agent": "knowledge", "graph_nodes": len(sub["nodes"]), "graph_edges": len(sub["edges"])}
+    sub = subgraph_for_symbol(sym, depth=2)
+    return {
+        "agent": "knowledge",
+        "graph_nodes": len(sub["nodes"]),
+        "graph_edges": len(sub["edges"]),
+        "llm_associations": use_llm,
+        "comprehensive": True,
+    }
 
 
 def run_analysis_swarm(
@@ -40,6 +38,7 @@ def run_analysis_swarm(
     broker_panel: pd.DataFrame,
     universe: pd.DataFrame | None = None,
     features: pd.DataFrame | None = None,
+    use_llm_graph: bool = False,
 ) -> dict[str, Any]:
     """
     Deploy full agent fleet (≥100 agents) in parallel.
@@ -50,7 +49,7 @@ def run_analysis_swarm(
 
     knowledge = {}
     try:
-        knowledge = _index_knowledge(sym, report)
+        knowledge = _index_knowledge(sym, report, row, use_llm=use_llm_graph)
     except Exception as exc:
         knowledge = {"error": str(exc)}
 
