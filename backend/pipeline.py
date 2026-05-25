@@ -11,6 +11,7 @@ from backend.features.pattern_library import build_pattern_store, enrich_with_an
 from backend.scanner.broker_insights import attach_broker_metrics
 from backend.scanner.volume_universe import attach_volume_from_panel, compute_early_rank_score, get_latest_scanner_universe
 from backend.ingest.backfill import backfill_accumulation_data, backfill_distribution_data
+from backend.ingest.data_inventory import data_folder_inventory, panel_side_summary
 from backend.ingest.broker_loader import backfill_broker_panel_from_data, load_excel_broker_detail
 from backend.ingest.panel_utils import snapshot_panel_all_horizons
 from backend.ingest.excel_loader import load_excel_workbook
@@ -57,12 +58,20 @@ def run_pipeline(
     existing_panel = store.load_panel()
     if acc_path or dist_path:
         store.append_panel(panel)
-    elif existing_panel.empty:
-        store.save_panel(panel)
     else:
-        panel = existing_panel  # skip re-importing legacy CSVs on every run
+        # Re-import from Data/ folders on every pipeline run (keeps acc+dist in sync)
+        dist_legacy = backfill_distribution_data(report_date=rd)
+        acc_legacy = backfill_accumulation_data(report_date=rd)
+        legacy_frames = [f for f in (dist_legacy, acc_legacy) if not f.empty]
+        if legacy_frames:
+            store.append_panel(pd.concat(legacy_frames, ignore_index=True))
+        elif existing_panel.empty and not panel.empty:
+            store.save_panel(panel)
+        elif existing_panel.empty:
+            return {"status": "error", "message": "No CSV/Excel in Data/Accumulation Data or Data/Distribution Data"}
 
     full_panel = snapshot_panel_all_horizons(store.load_panel())
+    inv = data_folder_inventory()
 
     broker_frames = []
     if acc_path and acc_path.exists():
@@ -115,11 +124,25 @@ def run_pipeline(
     signals["early_rank_score"] = compute_early_rank_score(signals)
     signals = signals.sort_values("daily_turnover_lac", ascending=False)
     signals["signal_tier"] = assign_universe_tiers(signals)
+    # Keep composite scores visible in UI (predictions table / deep dive)
+    for col in (
+        "floorsheet_momentum_score",
+        "early_momentum_score",
+        "distribution_risk_score",
+        "smart_money_score",
+        "acc_dist_ratio",
+        "ofi",
+        "mtf_convergence",
+    ):
+        if col in latest_features.columns and col not in signals.columns:
+            signals[col] = latest_features[col].values
     store.save_predictions(signals)
 
     rag = SimpleRAG()
     rag.index_outcomes(features, labels)
 
+    psum = panel_side_summary(full_panel)
+    fs_mean = float(features["floorsheet_momentum_score"].mean()) if "floorsheet_momentum_score" in features.columns else 0.0
     return {
         "status": "ok",
         "report_date": str(latest_date.date()) if pd.notna(latest_date) else str(rd),
@@ -127,4 +150,7 @@ def run_pipeline(
         "trigger_count": int(signals[signals["signal_tier"].isin(["Trigger", "Confirmed"])].shape[0]),
         "model_meta": meta,
         "multimodal_meta": mm_meta,
+        "data_inventory": inv,
+        "panel_sides": psum,
+        "floorsheet_score_avg": round(fs_mean, 1),
     }

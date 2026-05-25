@@ -112,7 +112,12 @@ with st.sidebar:
             st.success(f"Done: {result.get('symbols', 0)} symbols")
     if st.session_state.get("last_pipeline"):
         lp = st.session_state["last_pipeline"]
-        st.caption(f"Last run: {lp.get('trigger_count', 0)} triggers")
+        st.caption(f"Last run: {lp.get('trigger_count', 0)} triggers · FS avg {lp.get('floorsheet_score_avg', '—')}")
+        ps = lp.get("panel_sides") or {}
+        st.caption(f"Panel: acc {ps.get('accumulation_rows', 0)} · dist {ps.get('distribution_rows', 0)} rows")
+        inv = lp.get("data_inventory") or {}
+        if inv.get("message"):
+            st.caption(inv["message"][:120])
         if lp.get("multimodal_meta"):
             mm = lp["multimodal_meta"]
             st.caption(f"Multimodal: {mm.get('status', mm.get('reason', '—'))}")
@@ -526,8 +531,30 @@ elif page == "Symbol Deep Dive":
         render_symbol_deep_dive(sym, preds, features, panel, broker_panel, universe_df=universe_dive)
 
 elif page == "Daily Upload":
+    from backend.ingest.data_inventory import data_folder_inventory, panel_side_summary
+
     st.header("Daily Upload")
     st.markdown("Upload **Accumulation** and **Distribution** Excel workbooks (multi-sheet). Optional OHLCV CSV.")
+
+    inv = data_folder_inventory()
+    ps = panel_side_summary(panel)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Acc files in folder", inv["accumulation_file_count"])
+    c2.metric("Dist files in folder", inv["distribution_file_count"])
+    c3.metric("Panel acc rows", ps.get("accumulation_rows", 0))
+    c4.metric("Panel dist rows", ps.get("distribution_rows", 0))
+    if inv.get("message"):
+        st.info(inv["message"])
+    if inv.get("files"):
+        st.dataframe(pd.DataFrame(inv["files"]), hide_index=True, use_container_width=True)
+    st.markdown(
+        """
+        **Why Floorsheet / Accumulation can show 0 in UI**
+        - **Accumulation Data** must contain CSV/Excel with headers like `Net Buy Amt`, `Accumulation Power`, `Buyer Broker`.
+        - Files named `AccumulationDistribution (13).csv` in **Distribution Data** are still **distribution** exports (`Net Sell Amt`, `Distribution Power`) — both sides are not in one file today.
+        - After adding accumulation files, click **Run Pipeline** in the sidebar to rebuild features.
+        """
+    )
     rd = st.date_input("Report date", value=date.today())
     acc_file = st.file_uploader("Accumulation Excel", type=["xlsx", "xls"])
     dist_file = st.file_uploader("Distribution Excel", type=["xlsx", "xls"])

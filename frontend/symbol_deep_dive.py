@@ -159,11 +159,17 @@ def render_symbol_deep_dive(
     c7.metric("LTP", f"{float(row.get('ltp')):.2f}" if pd.notna(row.get("ltp")) else "—")
 
     fs = float(row.get("floorsheet_momentum_score") or 0)
-    if fs <= 0:
+    ems_raw = float(row.get("early_momentum_score") or 0)
+    from backend.ingest.data_inventory import data_folder_inventory
+
+    inv = data_folder_inventory()
+    if fs <= 0 or ems_raw <= 0:
         st.warning(
-            "Floorsheet momentum is 0 — upload **Accumulation** data or run pipeline; "
-            "distribution-only mode uses floorsheet proxy from dist horizons."
+            f"**Floorsheet {fs:.0f} / EMS {ems_raw:.0f}** — {inv.get('message', '')} "
+            "Click **Run Pipeline** after placing accumulation CSVs in `Data/Accumulation Data/`."
         )
+    elif fs > 0 and not inv.get("has_true_accumulation"):
+        st.caption(f"Floorsheet **{fs:.0f}** = distribution-proxy score (accumulation folder still empty).")
 
     with st.expander("Score breakdown (raw vs effective)", expanded=False):
         raw_p = float(row.get("p_long_momentum_raw") or row.get("p_long_momentum") or 0)
