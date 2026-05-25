@@ -57,9 +57,20 @@ COLUMN_LABELS = {
 def format_scanner_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    for col in ("ltp", "daily_volume", "daily_turnover_lac", "broker_pressure", "early_momentum_score"):
+    for col in (
+        "ltp",
+        "daily_volume",
+        "daily_turnover_lac",
+        "broker_pressure",
+        "early_momentum_score",
+        "floorsheet_momentum_score",
+    ):
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
+            if col in ("daily_turnover_lac", "daily_volume"):
+                out[col] = out[col].round(1)
+            elif col in ("early_momentum_score", "floorsheet_momentum_score", "broker_pressure"):
+                out[col] = out[col].round(1)
 
     if "early_rank_score" in out.columns:
         out["early_rank_score"] = (pd.to_numeric(out["early_rank_score"], errors="coerce").fillna(0) * 100).round(1)

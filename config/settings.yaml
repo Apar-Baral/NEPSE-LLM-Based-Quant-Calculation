@@ -29,7 +29,7 @@ multimodal:
   blend_weight: 0.5  # mm_p_long vs LightGBM in predict()
 
 scanner:
-  high_volume_top_n: 120
+  high_volume_top_n: 0  # 0 = all symbols (no turnover cap)
   brief_detail_n: 25
   min_daily_volume: 0
   rank_by: daily_turnover_lac  # 1D floorsheet turnover only
@@ -47,7 +47,7 @@ agents:
 
 brokers:
   watch_list: [58, 49, 45, 55, 34, 6, 38, 43, 70]
-  analyze_top_n: 10  # mathematically rank top brokers by market activity
+  analyze_top_n: 0  # 0 = all brokers ranked by activity (no cap)
   # Circular — universe-calibrated (not every stock)
   circular_flag_percentile: 0.93
   min_wash_score: 62

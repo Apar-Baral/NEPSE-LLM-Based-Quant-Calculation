@@ -5,7 +5,38 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 from backend.config import PROCESSED_DIR
+
+
+def _json_default(obj: object):
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64, np.float32)):
+        v = float(obj)
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return v
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if isinstance(obj, (pd.Timestamp,)):
+        return str(obj)
+    if hasattr(obj, "item"):
+        return obj.item()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _sanitize_meta(meta: dict) -> dict:
+    out = {}
+    for k, v in meta.items():
+        try:
+            json.dumps(v, default=_json_default)
+            out[k] = v
+        except TypeError:
+            out[k] = str(v)
+    return out
 
 GRAPH_PATH = PROCESSED_DIR / "logic_graph.json"
 
@@ -37,7 +68,7 @@ class LogicGraphStore:
                 n["meta"] = {**n.get("meta", {}), **meta}
                 n["label"] = label
                 return
-        self.nodes.append({"id": nid, "kind": kind, "label": label, "meta": meta})
+        self.nodes.append({"id": nid, "kind": kind, "label": label, "meta": _sanitize_meta(meta)})
 
     def _add_edge(
         self,
@@ -76,11 +107,14 @@ class LogicGraphStore:
         sym = sym.upper()
         sid = self._nid("symbol", sym)
         self._upsert_node(sid, "symbol", sym, {})
-        for row in broker_table[:15]:
+        for row in broker_table[:20]:
             bid = str(row.get("broker_id", ""))
             if not bid or bid == "—":
                 continue
-            bid_node = self._nid("broker", bid)
+            act = float(row.get("activity_qty") or 0)
+            if act <= 0 and float(row.get("buy_qty") or 0) + float(row.get("sell_qty") or 0) <= 0:
+                continue
+            bid_node = self._nid("broker", f"{sym}:{bid}")
             self._upsert_node(bid_node, "broker", f"Broker {bid}", {k: v for k, v in row.items() if k != "broker_id"})
             self._add_edge(
                 sid,
@@ -120,6 +154,7 @@ class LogicGraphStore:
             json.dumps(
                 {"meta": self.meta, "nodes": self.nodes[-12000:], "edges": self.edges[-30000:]},
                 indent=2,
+                default=_json_default,
             ),
             encoding="utf-8",
         )

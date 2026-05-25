@@ -134,15 +134,35 @@ def build_comprehensive_knowledge(
         g._add_edge(g._nid("domain", f"{dom}:{sym}"), nid, "measures", weight=0.7)
         g._add_edge(sid, nid, "has_metric", weight=0.6)
 
-    # Brokers from table
-    for brow in fleet_report.broker_table[:15]:
+    # Brokers with actual activity on this symbol only (skip market-top padding rows)
+    active_brokers = [
+        brow
+        for brow in fleet_report.broker_table
+        if float(brow.get("activity_qty") or 0) > 0
+        or float(brow.get("buy_qty") or 0) + float(brow.get("sell_qty") or 0) > 0
+    ]
+    active_brokers.sort(key=lambda b: float(b.get("conviction_score") or 0), reverse=True)
+    for brow in active_brokers[:20]:
         bid = str(brow.get("broker_id", ""))
         if not bid or bid == "—":
             continue
-        bid_node = g._nid("broker", bid)
-        g._upsert_node(bid_node, "broker", f"Broker {bid}", {k: v for k, v in brow.items() if k != "broker_id"})
-        g._add_edge(g._nid("domain", f"broker:{sym}"), bid_node, "desk_activity", weight=(brow.get("conviction_score") or 0) / 100)
-        g._add_edge(sid, bid_node, brow.get("bias", "flow"), weight=(brow.get("conviction_score") or 30) / 100, rationale=brow.get("flow_label", ""))
+        bid_node = g._nid("broker", f"{sym}:{bid}")
+        brow_meta = {k: v for k, v in brow.items() if k != "broker_id"}
+        brow_meta["symbol"] = sym
+        g._upsert_node(bid_node, "broker", f"Broker {bid}", brow_meta)
+        g._add_edge(
+            g._nid("domain", f"broker:{sym}"),
+            bid_node,
+            "desk_activity",
+            weight=(brow.get("conviction_score") or 0) / 100,
+        )
+        g._add_edge(
+            sid,
+            bid_node,
+            str(brow.get("bias", "flow")),
+            weight=(brow.get("conviction_score") or 30) / 100,
+            rationale=str(brow.get("flow_label", "")),
+        )
 
     # Tier + patterns
     tier_nid = g._nid("signal", f"{tier}:{sym}")
@@ -156,6 +176,15 @@ def build_comprehensive_knowledge(
         g._add_edge(pid, g._nid("domain", f"quant:{sym}"), "informs", weight=0.7)
 
     # Rule + optional LLM cross-links
+    # Drop legacy global broker:* nodes for this symbol rebuild
+    g.nodes = [n for n in g.nodes if not (n.get("kind") == "broker" and n["id"].startswith("broker:") and ":" not in n["id"][7:])]
+    g.edges = [
+        e
+        for e in g.edges
+        if not (e["source"].startswith("broker:") and e["source"].count(":") == 1)
+        and not (e["target"].startswith("broker:") and e["target"].count(":") == 1)
+    ]
+
     for link in rule_based_associations(
         sym, row, fleet_report.domain_scores, fleet_report.domain_signals,
         fleet_report.composite_score, fleet_report.consensus_long_pct,
@@ -286,7 +315,17 @@ def subgraph_for_symbol(sym: str, depth: int = 2) -> dict:
         frontier = next_frontier
 
     sid = g._nid("symbol", sym)
-    nodes = [n for n in g.nodes if n["id"] in seen_n and (n.get("kind") != "symbol" or n["id"] == sid)]
+    def _keep_node(n: dict) -> bool:
+        if n["id"] not in seen_n:
+            return False
+        if n.get("kind") == "symbol" and n["id"] != sid:
+            return False
+        # Legacy global broker nodes (broker:33) — skip unless tied to this symbol
+        if n.get("kind") == "broker" and n["id"].count(":") == 1:
+            return False
+        return True
+
+    nodes = [n for n in g.nodes if _keep_node(n)]
     nids = {n["id"] for n in nodes}
     edges = [e for e in all_edges if e["source"] in nids and e["target"] in nids]
     return {"nodes": nodes, "edges": edges, "symbol": sym, "depth": depth}

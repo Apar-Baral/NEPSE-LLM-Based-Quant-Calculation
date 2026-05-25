@@ -114,39 +114,55 @@ def build_comprehensive_figure(sub: dict, title: str, filter_kinds: list[str] | 
             )
         )
 
-    # Nodes by kind (legend)
+    # Nodes by kind (legend) — labels as axis annotations so text scales when zooming
     kinds_seen = set()
+    label_annotations: list[dict] = []
     for n in nodes:
         kind = n.get("kind", "default")
         if kind in kinds_seen:
             continue
         kinds_seen.add(kind)
         subset = [x for x in nodes if x.get("kind") == kind]
-        xs, ys, texts, hovers, sizes, colors = [], [], [], [], [], []
+        xs, ys, hovers, sizes, colors = [], [], [], [], []
         for node in subset:
             nid = node["id"]
             if nid not in pos:
                 continue
-            xs.append(pos[nid][0])
-            ys.append(pos[nid][1])
-            texts.append(node.get("label", nid.split(":")[-1])[:18])
+            x, y = pos[nid]
+            xs.append(x)
+            ys.append(y)
             hovers.append(_hover_text(node))
-            sizes.append(NODE_SIZES.get(kind, 10))
+            sizes.append(NODE_SIZES.get(kind, 10) + 2)
             colors.append(NODE_COLORS.get(kind, NODE_COLORS["default"]))
+            label = str(node.get("label", nid.split(":")[-1]))[:22]
+            label_annotations.append(
+                dict(
+                    x=x,
+                    y=y,
+                    text=label,
+                    showarrow=False,
+                    xref="x",
+                    yref="y",
+                    xanchor="center",
+                    yanchor="bottom",
+                    yshift=10,
+                    font=dict(size=11, color="#e6edf3"),
+                )
+            )
         fig.add_trace(
             go.Scatter(
                 x=xs,
                 y=ys,
-                mode="markers+text",
+                mode="markers",
                 name=kind.replace("_", " ").title(),
-                text=texts,
-                textposition="top center",
-                textfont=dict(size=9, color="#e6edf3"),
                 marker=dict(size=sizes, color=colors, line=dict(width=1, color="#fff")),
                 hovertext=hovers,
                 hoverinfo="text",
             )
         )
+
+    if label_annotations:
+        fig.update_layout(annotations=label_annotations)
 
     fig.update_layout(
         title=title,
@@ -179,12 +195,48 @@ def render_node_inspector(sub: dict) -> None:
         st.dataframe(pd.DataFrame(related), hide_index=True, use_container_width=True)
 
 
+def _render_kg_guide() -> None:
+    with st.expander("What this graph means (findings & how to act)", expanded=False):
+        st.markdown(
+            """
+**What you are looking at**  
+A single-stock **map of evidence**: quant math, broker desks, financial risk, and LLM-style rules, all linked to one ticker.
+
+| Node type | Meaning | How to read it |
+|-----------|---------|----------------|
+| **Symbol** | Your company | Center of the story — tier, turnover, EMS, P(long) in hover |
+| **Domain** (QUANT / FINANCIAL / BROKER / LLM) | Specialist “desks” | Score + bullish/bearish/neutral — which side of the house agrees |
+| **Agent** | One automated check (162 total) | Green link → supports long · Red → warns · Skip = no data that day |
+| **Metric** | Hard numbers (EMS, dist risk, turnover) | Linked to the domain that owns that metric |
+| **Broker** | A broker desk **with real trades on this symbol** | Not the whole market top-10 — only desks that traded this name |
+| **Pipeline step** | Volumetric / broker / price action / momentum | Pass/fail and score from the 4-step quant pipeline |
+| **Signal tier** | Setup / Trigger / Watch / … | Final scanner classification |
+
+**Edge colors**  
+- **Green** — supports long (absorption, confirms, bullish agent)  
+- **Red** — conflict (distribution pressure, bearish agent, circular risk)  
+- **Gray** — neutral association  
+
+**Your position (how to decide)**  
+1. **Broker + QUANT agree (green)** and financial dist risk not extreme → *consider long / add on confirmation*.  
+2. **Red edges dominate** or tier **Invalidated** → *avoid new longs; exit or reduce if already in*.  
+3. **Mixed graph** (Setup tier, split agents) → *hold / watch — wait for turnover + tier upgrade*.  
+
+**What to do with findings**  
+- Use the graph **before** LLM chat: it shows *why* a score exists.  
+- Rebuild after new CSV upload or when switching symbol.  
+- Cross-check **Momentum Scanner** turnover (Lac) — graph does not replace liquidity filters.
+            """
+        )
+
+
 def render_knowledge_graph_page(symbol: str | None = None) -> None:
     st.markdown("### Comprehensive knowledge graph")
     st.caption(
         "Dynamic graph from **162 agents** + quant pipeline + financial metrics + broker desks + cross-domain associations. "
         "Green edges = support · Red = conflict · Deploy agents on a symbol to rebuild."
     )
+    _render_kg_guide()
 
     stat = storage_status()
     with st.expander("Storage & vector DB", expanded=False):
@@ -199,8 +251,29 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
     rag = VectorLogicRAG()
     c4.metric("Vector docs", len(rag._fallback))
 
+    from backend.scanner.symbol_lookup import all_tracked_symbols
+    from frontend.symbol_search import symbol_picker
+
+    store_syms: list[str] = []
+    try:
+        from backend.db.store import DataStore
+
+        s = DataStore()
+        store_syms = all_tracked_symbols(s.load_predictions(), s.load_features(), s.load_broker_panel())
+    except Exception:
+        pass
+
     default_sym = (symbol or "").strip().upper()
-    sym = (symbol or st.text_input("Focus symbol", value=default_sym or "NGPL", key="kg_sym")).strip().upper()
+    if store_syms:
+        sym = symbol_picker(
+            "Graph symbol",
+            store_syms,
+            key_prefix="kg",
+            default=default_sym or store_syms[0],
+            help_text="Search by ticker or full company name. Rebuild graph after changing symbol.",
+        )
+    else:
+        sym = (symbol or st.text_input("Focus symbol", value=default_sym or "NGPL", key="kg_sym")).strip().upper()
     depth = st.slider("Graph depth (hops from symbol)", 1, 3, 2)
     filter_dom = st.multiselect(
         "Show node types",
@@ -214,21 +287,46 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
         from backend.db.store import DataStore
         from backend.agents.fleet import deploy_agent_fleet
         from backend.knowledge.comprehensive_graph import build_comprehensive_knowledge
+        from frontend.data_access import load_panel_safe
 
-        store = DataStore()
-        preds, panel, bp, feat = store.load_predictions(), store.load_panel(), store.load_broker_panel(), store.load_features()
-        from backend.scanner.volume_universe import get_latest_scanner_universe
+        progress = st.progress(0.0, text="Starting…")
+        status = st.empty()
 
-        universe = get_latest_scanner_universe(preds, panel=panel, broker_panel=bp, top_n=120, features=feat)
-        row_df = enrich_symbol_row(sym, preds, panel, bp, features=feat, universe_df=universe)
-        if row_df.empty:
-            st.error("No symbol data — run pipeline")
-        else:
-            sym_panel = panel[panel["symbol"].astype(str).str.upper() == sym]
-            report = deploy_agent_fleet(sym, row_df.iloc[0], sym_panel, bp, features=feat)
-            build_comprehensive_knowledge(sym, row_df.iloc[0], report, report.quant_pipeline, use_llm_associations=use_llm_rebuild)
-            st.success(f"Graph built: {report.agent_count} agents indexed")
-            st.rerun()
+        def _step(pct: float, msg: str) -> None:
+            progress.progress(min(max(pct, 0.02), 0.98), text=msg)
+            status.caption(msg)
+
+        try:
+            _step(0.05, "Loading data…")
+            store = DataStore()
+            preds = store.load_predictions()
+            panel = load_panel_safe(store, repair=True)
+            bp = store.load_broker_panel()
+            feat = store.load_features()
+            from backend.scanner.volume_universe import get_latest_scanner_universe
+
+            _step(0.25, "Building scanner context…")
+            universe = get_latest_scanner_universe(preds, panel=panel, broker_panel=bp, top_n=0, features=feat)
+            row_df = enrich_symbol_row(sym, preds, panel, bp, features=feat, universe_df=universe)
+            if row_df.empty:
+                st.error("No symbol data — run pipeline")
+            else:
+                sym_panel = panel[panel["symbol"].astype(str).str.upper() == sym]
+                _step(0.45, f"Running {sym} agent fleet (parallel)…")
+                report = deploy_agent_fleet(sym, row_df.iloc[0], sym_panel, bp, features=feat)
+                _step(0.75, "Writing knowledge graph + vectors…")
+                build_comprehensive_knowledge(
+                    sym, row_df.iloc[0], report, report.quant_pipeline, use_llm_associations=use_llm_rebuild
+                )
+                progress.progress(1.0, text="Done")
+                status.empty()
+                st.success(f"Graph built: **{report.agent_count}** agents · composite **{report.composite_score:.0f}/100**")
+                st.balloons()
+                st.rerun()
+        except Exception as exc:
+            progress.empty()
+            status.empty()
+            st.error(f"Graph build failed: {exc}")
 
     if sym:
         from backend.knowledge.comprehensive_graph import subgraph_for_symbol
@@ -236,7 +334,11 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
         sub = subgraph_for_symbol(sym, depth=depth)
     else:
         sub = {"nodes": [], "edges": []}
-    st.caption(f"**{sym}** subgraph: {len(sub.get('nodes', []))} nodes · {len(sub.get('edges', []))} edges (depth {depth})")
+    st.caption(
+        f"**{sym}** subgraph: {len(sub.get('nodes', []))} nodes · {len(sub.get('edges', []))} edges (depth {depth}). "
+        "Broker nodes = desks with **actual trades on this symbol** (not market-wide top-10 padding). "
+        "Click **Rebuild** after changing symbol."
+    )
 
     fig = build_comprehensive_figure(sub, f"{sym} — quant · financial · broker · LLM", filter_kinds=filter_dom or None)
     if fig:

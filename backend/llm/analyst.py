@@ -222,7 +222,39 @@ def _prepare_scanner_df(scanner_df: pd.DataFrame) -> pd.DataFrame:
         df["p_long_momentum"] = pd.to_numeric(df["p_long_momentum"], errors="coerce").fillna(0)
     if "early_rank_score" in df.columns:
         df["early_rank_score"] = pd.to_numeric(df["early_rank_score"], errors="coerce").fillna(0)
+    if "daily_turnover_lac" in df.columns:
+        df["daily_turnover_lac"] = pd.to_numeric(df["daily_turnover_lac"], errors="coerce").fillna(0)
+    if "volume_rank" not in df.columns and "daily_turnover_lac" in df.columns:
+        df["volume_rank"] = df["daily_turnover_lac"].rank(ascending=False, method="min").astype(int)
+    if "turnover_rank" not in df.columns and "daily_turnover_lac" in df.columns:
+        df["turnover_rank"] = df["volume_rank"]
     return df
+
+
+def _rank_for_llm_context(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """
+    Prefer highly traded names first, then early momentum within liquid names.
+    Drops near-zero turnover rows from the LLM payload.
+    """
+    ranked = _prepare_scanner_df(df)
+    if ranked.empty:
+        return ranked
+
+    if "daily_turnover_lac" in ranked.columns:
+        ranked = ranked[ranked["daily_turnover_lac"] > 1.0].copy()
+    if ranked.empty:
+        ranked = _prepare_scanner_df(df)
+
+    if "daily_turnover_lac" in ranked.columns and "early_rank_score" in ranked.columns:
+        ranked = ranked.sort_values(
+            ["daily_turnover_lac", "early_rank_score"],
+            ascending=[False, False],
+        )
+    elif "daily_turnover_lac" in ranked.columns:
+        ranked = ranked.sort_values("daily_turnover_lac", ascending=False)
+    elif "early_rank_score" in ranked.columns:
+        ranked = ranked.sort_values("early_rank_score", ascending=False)
+    return ranked.head(n)
 
 
 def generate_daily_brief(scanner_df: pd.DataFrame, top_n: int | None = None) -> str:
@@ -232,24 +264,26 @@ def generate_daily_brief(scanner_df: pd.DataFrame, top_n: int | None = None) -> 
     cfg = load_yaml_config("settings.yaml").get("scanner", {})
     detail_n = top_n or cfg.get("brief_detail_n", 25)
 
-    ranked = _prepare_scanner_df(scanner_df)
-    if "early_rank_score" in ranked.columns:
-        top = ranked.nlargest(detail_n, "early_rank_score")
-    else:
-        top = ranked.head(detail_n)
+    top = _rank_for_llm_context(scanner_df, detail_n)
     summaries = [symbol_to_metrics(row) for _, row in top.iterrows()]
 
     vol_note = ""
-    if "daily_volume" in scanner_df.columns:
-        vol_note = f"Universe: top {len(scanner_df)} NEPSE symbols by 1D traded volume. "
+    if "daily_turnover_lac" in scanner_df.columns:
+        med = float(pd.to_numeric(scanner_df["daily_turnover_lac"], errors="coerce").median())
+        vol_note = (
+            f"Universe: {len(scanner_df)} symbols sorted by **1D turnover (Lac)** first, "
+            f"then early_rank_score. Median turnover {med:.1f} Lac. "
+        )
 
     prompt = (
-        f"{vol_note}Analyze early LONG momentum candidates among high-volume NEPSE stocks.\n"
-        f"Focus on symbols with highest early_rank_score, accumulation patterns, and volume spikes.\n"
-        f"Output a markdown table: Symbol | LTP | Volume | Early Rank | Verdict | Key Drivers | Risks | Action\n"
-        f"Then summarize top 3 actionable long setups and names to avoid.\n"
-        f"METRICS (top {len(summaries)} by early prediction rank within high-volume universe):\n"
-        f"{json.dumps(summaries, indent=2)}"
+        f"{vol_note}Analyze early LONG momentum among **highly traded** NEPSE stocks only.\n"
+        f"RULES: (1) Prioritize highest daily_turnover_lac / lowest volume_rank. "
+        f"(2) Ignore illiquid names (turnover_rank > 80 or daily_turnover_lac < 5) unless user asked. "
+        f"(3) Within liquid names, use early_rank_score and signal_tier for momentum.\n"
+        f"Output markdown table: Symbol | LTP | Turnover (Lac) | Vol rank | Early Rank | Verdict | Key Drivers | Risks | Action\n"
+        f"Then top 3 **liquid** long setups and illiquid names to avoid.\n"
+        f"METRICS (top {len(summaries)} by turnover then momentum):\n"
+        f"{json.dumps(summaries, indent=2, default=_serialize)}"
     )
     return _call_llm(prompt)
 
@@ -286,22 +320,18 @@ def chat_query(
     if asked:
         focus = ctx[ctx["symbol"].astype(str).str.upper().isin(asked)]
         rest = ctx[~ctx["symbol"].astype(str).str.upper().isin(asked)]
-        if "early_rank_score" in rest.columns:
-            rest = rest.nlargest(min(15, len(rest)), "early_rank_score")
-        top = pd.concat([focus, rest], ignore_index=True).head(45)
-    elif "early_rank_score" in ctx.columns:
-        top = ctx.nlargest(min(40, len(ctx)), "early_rank_score")
-    elif "daily_turnover_lac" in ctx.columns:
-        top = ctx.nlargest(min(40, len(ctx)), "daily_turnover_lac")
+        rest = _rank_for_llm_context(rest, 15)
+        top = pd.concat([focus, rest], ignore_index=True).drop_duplicates(subset=["symbol"], keep="first").head(45)
     else:
-        top = ctx.head(30)
+        top = _rank_for_llm_context(ctx, 40)
 
     metrics = [symbol_to_metrics(r) for _, r in top.iterrows()]
     focus_note = f"User asked about: {', '.join(asked)}. Prioritize these symbols.\n" if asked else ""
     prompt = (
         f"User question: {question}\n\n"
         f"{focus_note}"
-        f"Context: NEPSE high-volume early long momentum scanner.\n"
-        f"Symbol metrics (JSON):\n{json.dumps(metrics, indent=2)}"
+        f"Context: NEPSE scanner — rank by **1D turnover (Lac)** first, then early_rank_score. "
+        f"Do not recommend illiquid stocks (low turnover) as top picks.\n"
+        f"Symbol metrics (JSON):\n{json.dumps(metrics, indent=2, default=_serialize)}"
     )
     return _call_llm(prompt)

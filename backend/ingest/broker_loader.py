@@ -78,18 +78,28 @@ def load_excel_broker_detail(path: Path, report_date: date | None = None) -> pd.
 
 
 def backfill_broker_panel_from_data(root: Path | None = None) -> pd.DataFrame:
-    """Build broker-level panel from Data/ CSV folders."""
+    """Build broker-level panel from Data/ CSV folders (All in one Data preferred)."""
     from backend.config import ROOT
+    from backend.ingest.backfill import resolve_all_in_one_dir
 
     root = root or ROOT
     frames = []
-    for folder, side in [("Distribution Data", "distribution"), ("Accumulation Data", "accumulation")]:
-        path = root / "Data" / folder
-        if not path.exists():
-            continue
-        for f in sorted(path.glob("*.csv")):
+
+    aio = resolve_all_in_one_dir()
+    if aio and list(aio.glob("*.csv")):
+        for f in sorted(aio.glob("*.csv")):
             try:
                 frames.append(load_csv_broker_detail(f))
             except Exception:
                 continue
+    else:
+        for folder in ("Distribution Data", "Accumulation Data"):
+            path = root / "Data" / folder
+            if not path.exists():
+                continue
+            for f in sorted(path.glob("*.csv")):
+                try:
+                    frames.append(load_csv_broker_detail(f))
+                except Exception:
+                    continue
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

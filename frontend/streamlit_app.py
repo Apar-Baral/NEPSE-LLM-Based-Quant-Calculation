@@ -78,7 +78,7 @@ from backend.ingest.panel_utils import snapshot_panel_all_horizons
 from backend.pipeline import run_pipeline
 from backend.scanner.broker_insights import horizon_net_flow
 from frontend.background_jobs import brief_status_sidebar, poll_brief_job, start_brief_generation
-from frontend.data_access import _fresh_datastore, load_broker_panel_safe, save_broker_panel_safe
+from frontend.data_access import _fresh_datastore, load_broker_panel_safe, load_panel_safe, save_broker_panel_safe
 from frontend.display_config import TIER_COLORS, TIER_HELP, TIER_ORDER, format_scanner_table
 from frontend.symbol_deep_dive import render_symbol_deep_dive
 from frontend.ui_theme import hero, inject_global_css
@@ -109,6 +109,7 @@ with st.sidebar:
             result = run_pipeline()
             st.session_state["last_pipeline"] = result
             st.session_state.pop("scanner_df", None)
+            st.session_state.pop("kg_names_loaded", None)
             n = result.get("symbols", 0)
             ps = result.get("panel_symbols", 0)
             bs = result.get("broker_symbols", 0)
@@ -118,16 +119,22 @@ with st.sidebar:
                 st.info(
                     f"Floorsheet panel has only **{ps}** symbol(s). "
                     f"Broker proxy expanded features to **{fs}**. "
-                    "Add more CSVs under `Data/Distribution Data/` for richer floorsheet."
+                    "Add CSVs under `Data/All in one Data/` (or legacy acc/dist folders) and run pipeline again."
                 )
     if st.session_state.get("last_pipeline"):
         lp = st.session_state["last_pipeline"]
         st.caption(f"Last run: {lp.get('trigger_count', 0)} triggers · FS avg {lp.get('floorsheet_score_avg', '—')}")
         ps = lp.get("panel_sides") or {}
-        st.caption(f"Panel: acc {ps.get('accumulation_rows', 0)} · dist {ps.get('distribution_rows', 0)} rows")
+        snap = lp.get("panel_sides_snapshot") or {}
+        st.caption(
+            f"Panel rows: acc {ps.get('accumulation_rows', 0)} · dist {ps.get('distribution_rows', 0)} "
+            f"(snapshot {snap.get('accumulation_rows', 0)} acc · {snap.get('distribution_rows', 0)} dist)"
+        )
         inv = lp.get("data_inventory") or {}
+        if lp.get("ingest_source") == "all_in_one":
+            st.caption("Source: **All in one Data** (acc + dist)")
         if inv.get("message"):
-            st.caption(inv["message"][:120])
+            st.caption(inv["message"][:140])
         if lp.get("multimodal_meta"):
             mm = lp["multimodal_meta"]
             st.caption(f"Multimodal: {mm.get('status', mm.get('reason', '—'))}")
@@ -166,7 +173,10 @@ def _col(df: pd.DataFrame, name: str, default=0.0) -> pd.Series:
 store = _fresh_datastore()
 preds = store.load_predictions()
 features = store.load_features()
-panel = snapshot_panel_all_horizons(store.load_panel())
+raw_panel = load_panel_safe(store, repair=True)
+panel = snapshot_panel_all_horizons(raw_panel)
+if len(raw_panel) < 100:
+    st.sidebar.warning("Floorsheet panel is incomplete — click **Run Pipeline** to reload from Data/.")
 broker_panel = load_broker_panel_safe(store)
 if broker_panel.empty:
     try:
@@ -188,17 +198,20 @@ def _tier_color_scale():
 if page == "Momentum Scanner":
     hero(
         "Momentum Scanner",
-        "Top 120 by 1D turnover · multimodal early-long score · broker desk 58/49",
+        "All symbols by turnover · multimodal early-long score · full broker desk",
     )
     if preds.empty:
         st.info("No predictions yet. Click **Run Pipeline** in the sidebar.")
     else:
         try:
             df = get_latest_scanner_universe(
-                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+                preds, panel=raw_panel, broker_panel=broker_panel, top_n=0, features=features
             )
-            if st.session_state.get("scanner_df") is not None and len(st.session_state["scanner_df"]) >= len(df):
-                df = st.session_state["scanner_df"]
+            cached = st.session_state.get("scanner_df")
+            if cached is not None and not cached.empty:
+                turn_sum = pd.to_numeric(cached.get("daily_turnover_lac"), errors="coerce").fillna(0).sum()
+                if turn_sum > 0 and len(cached) >= len(df):
+                    df = cached
         except ImportError as exc:
             st.error(f"Scanner import error: {exc}")
             st.code(
@@ -284,7 +297,7 @@ if page == "Momentum Scanner":
                     df = pd.concat([extra, df], ignore_index=True).drop_duplicates(
                         subset=["symbol"], keep="first"
                     )
-                    st.success(f"Showing **{extra.iloc[0]['symbol']}** (outside top 120 universe)")
+                    st.success(f"Showing **{extra.iloc[0]['symbol']}** (added to filtered view)")
                 else:
                     st.warning(f"**{search_q.strip().upper()}** not in predictions — run pipeline after ingest.")
 
@@ -346,7 +359,7 @@ if page == "Momentum Scanner":
             from backend.scanner.broker_top10 import discover_top_brokers
             from backend.scanner.broker_desk import top_broker_market_view
 
-            top10 = discover_top_brokers(broker_panel, top_n=10)
+            top10 = discover_top_brokers(broker_panel, top_n=0)
             st.markdown(f"**Top 10 brokers (mathematical rank):** {', '.join(top10)} — **1D** net flow")
             if not broker_panel.empty:
                 mkt = top_broker_market_view(broker_panel, horizon="1D")
@@ -436,14 +449,7 @@ elif page == "Knowledge Graph":
     from frontend.knowledge_viz import render_knowledge_graph_page
 
     hero("Knowledge Graph", "Vector DB + logic relationships (MiroFish-style graph)")
-    dive_sym = st.session_state.get("dive_select", "")
-    kg_sym = st.text_input(
-        "Graph symbol",
-        value=(dive_sym or "NGPL").strip().upper(),
-        key="kg_focus_sym",
-        help="Only this symbol's nodes are shown (no cross-ticker links).",
-    )
-    render_knowledge_graph_page(symbol=kg_sym)
+    render_knowledge_graph_page(symbol=st.session_state.get("dive_select", ""))
 
 elif page == "Data & Storage":
     from frontend.knowledge_viz import storage_status
@@ -462,8 +468,11 @@ elif page == "Data & Storage":
         """
     )
     if st.button("Verify write test"):
-        n = store.save_panel(panel.tail(1), "symbol_panel") if not panel.empty else 0
-        st.success(f"Panel write OK ({n} rows sample). DB: {store.db_path}")
+        test_path = store.db_path.parent / "processed" / "_write_test.parquet"
+        n = len(panel.tail(1))
+        if not panel.empty:
+            panel.tail(1).to_parquet(test_path, index=False)
+        st.success(f"Write test OK ({n} row → {test_path.name}). Main panel was **not** modified.")
 
 elif page == "Model Lab":
     hero("Model Lab", "Self-learning multimodal stack trained on your floorsheet data")
@@ -531,20 +540,19 @@ elif page == "Symbol Deep Dive":
     if preds.empty:
         st.info("Run pipeline first.")
     else:
+        from frontend.symbol_search import symbol_picker
+
         all_syms = all_tracked_symbols(preds, features, broker_panel)
-        sym_search = st.text_input("Search symbol", placeholder="NGPL, API…", key="dive_search").strip().upper()
-        if sym_search and sym_search in all_syms:
-            st.session_state["dive_select"] = sym_search
-        if "dive_select" not in st.session_state or st.session_state["dive_select"] not in all_syms:
-            st.session_state["dive_select"] = all_syms[0]
-        sym = st.selectbox(
-            f"Symbol ({len(all_syms)} tracked)",
+        sym = symbol_picker(
+            "Symbol",
             all_syms,
-            key="dive_select",
+            key_prefix="dive",
+            default=st.session_state.get("dive_select", all_syms[0] if all_syms else ""),
         )
+        st.session_state["dive_select"] = sym
         universe_dive = (
             get_latest_scanner_universe(
-                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+                preds, panel=raw_panel, broker_panel=broker_panel, top_n=0, features=features
             )
             if not preds.empty
             else pd.DataFrame()
@@ -560,8 +568,12 @@ elif page == "Daily Upload":
     inv = data_folder_inventory()
     ps = panel_side_summary(panel)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Acc files in folder", inv["accumulation_file_count"])
-    c2.metric("Dist files in folder", inv["distribution_file_count"])
+    if inv.get("uses_all_in_one"):
+        c1.metric("All-in-one files", inv.get("all_in_one_file_count", 0))
+        c2.metric("Acc / Dist files", f"{inv.get('all_in_one_acc_files', 0)} / {inv.get('all_in_one_dist_files', 0)}")
+    else:
+        c1.metric("Acc files in folder", inv["accumulation_file_count"])
+        c2.metric("Dist files in folder", inv["distribution_file_count"])
     c3.metric("Panel acc rows", ps.get("accumulation_rows", 0))
     c4.metric("Panel dist rows", ps.get("distribution_rows", 0))
     if inv.get("message"):
@@ -570,10 +582,10 @@ elif page == "Daily Upload":
         st.dataframe(pd.DataFrame(inv["files"]), hide_index=True, use_container_width=True)
     st.markdown(
         """
-        **Why Floorsheet / Accumulation can show 0 in UI**
-        - **Accumulation Data** must contain CSV/Excel with headers like `Net Buy Amt`, `Accumulation Power`, `Buyer Broker`.
-        - Files named `AccumulationDistribution (13).csv` in **Distribution Data** are still **distribution** exports (`Net Sell Amt`, `Distribution Power`) — both sides are not in one file today.
-        - After adding accumulation files, click **Run Pipeline** in the sidebar to rebuild features.
+        **All in one Data (recommended)**
+        - Put all floorsheet CSV exports in `Data/All in one Data/`.
+        - Each file is auto-tagged **accumulation** (`Buyer Broker`, `Net Buy Amt`) or **distribution** (`Seller Broker`, `Net Sell Amt`).
+        - Click **Run Pipeline** in the sidebar to reload panel, features, broker data, and predictions.
         """
     )
     rd = st.date_input("Report date", value=date.today())
@@ -681,9 +693,9 @@ elif page == "LLM Briefing":
             st.write("OK:", test.get("ok"))
             st.markdown(test.get("response", ""))
     with c2:
-        if st.button("Generate Brief (Top 120 Vol)", disabled=st.session_state.get("brief_generating", False)):
+        if st.button("Generate Brief (full universe)", disabled=st.session_state.get("brief_generating", False)):
             universe = get_latest_scanner_universe(
-                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+                preds, panel=panel, broker_panel=broker_panel, top_n=0, features=features
             )
             start_brief_generation(universe)
             st.rerun()
@@ -710,7 +722,7 @@ elif page == "Chat":
     if st.button("Send", type="primary") and q:
         universe = (
             get_latest_scanner_universe(
-                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+                preds, panel=panel, broker_panel=broker_panel, top_n=0, features=features
             )
             if not preds.empty
             else pd.DataFrame()

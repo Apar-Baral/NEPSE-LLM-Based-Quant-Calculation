@@ -35,3 +35,15 @@ def save_broker_panel_safe(store, df: pd.DataFrame) -> int:
     if hasattr(store, "save_panel"):
         return store.save_panel(df, "broker_panel")
     return 0
+
+
+def load_panel_safe(store=None, *, repair: bool = True) -> pd.DataFrame:
+    """Load symbol_panel; auto-repair if parquet was overwritten (e.g. write test)."""
+    store = store or _fresh_datastore()
+    panel = store.load_panel()
+    if not repair:
+        return panel
+    from backend.ingest.panel_health import ensure_symbol_panel
+
+    panel, _repaired = ensure_symbol_panel(store)
+    return panel

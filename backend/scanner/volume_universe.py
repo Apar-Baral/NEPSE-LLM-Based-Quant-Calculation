@@ -106,23 +106,35 @@ def attach_volume_from_panel(features: pd.DataFrame, panel: pd.DataFrame) -> pd.
     if panel.empty or "buy_qty_sum" not in panel.columns:
         return _ensure_volume_cols(out)
 
-    panel_syms = panel["symbol"].nunique() if "symbol" in panel.columns else 0
-    has_vol = any(
-        c in out.columns and pd.to_numeric(out[c], errors="coerce").fillna(0).sum() > 0 for c in VOLUME_COLS
-    )
-    if has_vol and panel_syms < max(10, int(len(out) * 0.15)):
-        return _ensure_volume_cols(out)
+    p = panel.copy()
+    if "report_date" in p.columns and p["report_date"].nunique() > 1:
+        p["report_date"] = pd.to_datetime(p["report_date"]).dt.normalize()
+        latest = p["report_date"].max()
+        on_latest = p[p["report_date"] == latest]
+        has_1d = (
+            "horizon" in on_latest.columns
+            and (on_latest["horizon"] == "1D").any()
+            and (on_latest["horizon"] != "unknown").any()
+        )
+        if has_1d:
+            p = on_latest
+        else:
+            # Latest upload often has only "unknown" horizon — use best snapshot per symbol/horizon
+            p = snapshot_panel_all_horizons(p)
 
     out = out.drop(columns=[c for c in VOLUME_COLS if c in out.columns], errors="ignore")
 
     rows = []
-    for sym, grp in panel.groupby("symbol"):
+    for sym, grp in p.groupby("symbol"):
         dist = _short_horizon_rows(grp, "distribution")
+        if dist.empty:
+            dist = grp[grp["side"] == "distribution"] if "side" in grp.columns else grp
         d1 = dist[dist["horizon"] == "1D"] if "horizon" in dist.columns else dist.head(1)
         if d1.empty and not dist.empty:
-            d1 = dist.head(1)
+            pref = dist[dist["horizon"] != "unknown"] if "horizon" in dist.columns else dist
+            d1 = pref.head(1) if not pref.empty else dist.head(1)
         if d1.empty:
-            d1 = grp[grp["horizon"] == "1D"] if "horizon" in grp.columns else grp.head(1)
+            d1 = grp.head(1)
 
         buy = pd.to_numeric(d1["buy_qty_sum"], errors="coerce").fillna(0).sum() if not d1.empty else 0.0
         sell = pd.to_numeric(d1["sell_qty_sum"], errors="coerce").fillna(0).sum() if not d1.empty else 0.0
@@ -183,7 +195,7 @@ def select_high_volume_universe(
     min_volume: float = 0,
 ) -> pd.DataFrame:
     cfg = _cfg()
-    top_n = top_n or cfg.get("high_volume_top_n", 120)
+    top_n = top_n if top_n is not None else cfg.get("high_volume_top_n", 120)
     min_volume = min_volume or cfg.get("min_daily_volume", 0)
     out = _ensure_volume_cols(df.copy())
 
@@ -191,7 +203,10 @@ def select_high_volume_universe(
     if out.empty:
         return out
 
-    out = out.sort_values("daily_turnover_lac", ascending=False).head(top_n).copy()
+    out = out.sort_values("daily_turnover_lac", ascending=False)
+    if top_n and int(top_n) > 0:
+        out = out.head(int(top_n))
+    out = out.copy()
     out["volume_rank"] = range(1, len(out) + 1)
     out["early_rank_score"] = compute_early_rank_score(out)
 
@@ -277,7 +292,7 @@ def get_latest_scanner_universe(
 ) -> pd.DataFrame:
     """Build scanner universe from features/predictions; fall back to broker_panel when sparse."""
     cfg = _cfg()
-    top_n = top_n or cfg.get("high_volume_top_n", 120)
+    top_n = top_n if top_n is not None else cfg.get("high_volume_top_n", 120)
     latest: pd.Timestamp | None = None
 
     if features is not None and not features.empty:
@@ -312,12 +327,21 @@ def get_latest_scanner_universe(
     if latest is None and not day.empty:
         latest = day["report_date"].max()
 
-    min_symbols = min(top_n, max(10, top_n // 4))
+    cap = int(top_n) if top_n and int(top_n) > 0 else 10_000
+    min_symbols = min(cap, max(10, cap // 4)) if cap < 10_000 else 10
     if broker_panel is not None and not broker_panel.empty:
         day = _expand_day_from_broker_panel(day, broker_panel, latest, min_symbols)
 
-    p = snapshot_panel_all_horizons(panel if panel is not None else pd.DataFrame())
+    p = panel if panel is not None else pd.DataFrame()
     day = attach_volume_from_panel(day, p)
+    if pd.to_numeric(day.get("daily_turnover_lac"), errors="coerce").fillna(0).sum() <= 0 and not predictions.empty:
+        if "daily_turnover_lac" in predictions.columns:
+            pred_vol = predictions[["symbol", "daily_turnover_lac", "daily_volume", "float_turnover_1d_abs"]].drop_duplicates(
+                "symbol"
+            )
+            day = day.drop(columns=[c for c in VOLUME_COLS if c in day.columns], errors="ignore")
+            day = day.merge(pred_vol, on="symbol", how="left")
+            day = _ensure_volume_cols(day)
     if p.empty and broker_panel is not None and not broker_panel.empty:
         vol_bp = day_frame_from_broker_panel(broker_panel, latest)
         if not vol_bp.empty:

@@ -10,7 +10,8 @@ from backend.features.engineer import build_daily_feature_matrix, expand_feature
 from backend.features.pattern_library import build_pattern_store, enrich_with_analogs
 from backend.scanner.broker_insights import attach_broker_metrics
 from backend.scanner.volume_universe import attach_volume_from_panel, compute_early_rank_score, get_latest_scanner_universe
-from backend.ingest.backfill import backfill_accumulation_data, backfill_distribution_data
+from backend.ingest.backfill import backfill_combined_floorsheet
+from backend.ingest.panel_health import ensure_symbol_panel
 from backend.ingest.data_inventory import data_folder_inventory, panel_side_summary
 from backend.ingest.broker_loader import backfill_broker_panel_from_data, load_excel_broker_detail
 from backend.ingest.panel_utils import snapshot_panel_all_horizons
@@ -43,34 +44,22 @@ def run_pipeline(
         dist = load_excel_workbook(dist_path, report_date=rd)
         frames.append(dist)
 
+    ingest_meta: dict = {"source": "upload"}
     if not frames:
-        dist_legacy = backfill_distribution_data(report_date=rd)
-        acc_legacy = backfill_accumulation_data(report_date=rd)
-        if not dist_legacy.empty:
-            frames.append(dist_legacy)
-        if not acc_legacy.empty:
-            frames.append(acc_legacy)
-
-    if not frames:
-        return {"status": "error", "message": "No data to ingest"}
+        panel, ingest_meta = backfill_combined_floorsheet(report_date=rd)
+        if panel.empty:
+            return {"status": "error", "message": "No data to ingest — add CSVs to Data/All in one Data/"}
+        frames.append(panel)
 
     panel = pd.concat(frames, ignore_index=True)
-    existing_panel = store.load_panel()
     if acc_path or dist_path:
         store.append_panel(panel)
     else:
-        # Re-import from Data/ folders on every pipeline run (keeps acc+dist in sync)
-        dist_legacy = backfill_distribution_data(report_date=rd)
-        acc_legacy = backfill_accumulation_data(report_date=rd)
-        legacy_frames = [f for f in (dist_legacy, acc_legacy) if not f.empty]
-        if legacy_frames:
-            store.append_panel(pd.concat(legacy_frames, ignore_index=True))
-        elif existing_panel.empty and not panel.empty:
-            store.save_panel(panel)
-        elif existing_panel.empty:
-            return {"status": "error", "message": "No CSV/Excel in Data/Accumulation Data or Data/Distribution Data"}
+        # Full refresh from disk folders (All in one Data replaces panel when present)
+        store.save_panel(panel)
 
-    full_panel = snapshot_panel_all_horizons(store.load_panel())
+    raw_panel, panel_repaired = ensure_symbol_panel(store)
+    full_panel = snapshot_panel_all_horizons(raw_panel)
     inv = data_folder_inventory()
 
     broker_frames = []
@@ -80,15 +69,28 @@ def run_pipeline(
         broker_frames.append(load_excel_broker_detail(dist_path, report_date=rd))
     if broker_frames:
         store.append_broker_panel(pd.concat(broker_frames, ignore_index=True))
-    elif store.load_broker_panel().empty:
+    else:
         bp = backfill_broker_panel_from_data()
         if not bp.empty:
             store.save_broker_panel(bp)
 
     broker_panel_stored = store.load_broker_panel()
-    features = build_daily_feature_matrix(full_panel)
+    # Multi-day history from raw panel; latest day uses full acc+dist snapshot (richer horizons).
+    hist_features = build_daily_feature_matrix(raw_panel)
+    snap_features = build_daily_feature_matrix(full_panel)
+    if not snap_features.empty and not hist_features.empty:
+        snap_rd = snap_features["report_date"].max()
+        hist_part = hist_features[hist_features["report_date"] != snap_rd]
+        features = pd.concat([hist_part, snap_features], ignore_index=True)
+    elif not snap_features.empty:
+        features = snap_features
+    else:
+        features = hist_features
     latest_rd = features["report_date"].max() if not features.empty else pd.Timestamp(rd)
     features = expand_features_with_broker(features, broker_panel_stored, report_date=latest_rd)
+    from backend.features.engineer import _add_composite_features
+
+    features = _add_composite_features(features)
     store.save_features(features)
 
     ohlcv = store.load_ohlcv()
@@ -121,13 +123,27 @@ def run_pipeline(
     predictions = predict(latest_features, broker_panel=broker_panel_stored)
     predictions = enrich_with_analogs(predictions)
     signals = apply_momentum_rules(latest_features, predictions)
-    signals = attach_volume_from_panel(signals, full_panel)
-    signals = attach_broker_metrics(signals, full_panel)
-    signals["early_rank_score"] = compute_early_rank_score(signals)
-    signals = signals.sort_values("daily_turnover_lac", ascending=False)
-    signals["signal_tier"] = assign_universe_tiers(signals)
-    # Keep composite scores visible in UI (predictions table / deep dive)
-    for col in (
+    vol_panel = full_panel if not full_panel.empty else raw_panel
+    signals = attach_volume_from_panel(signals, vol_panel)
+    if broker_panel_stored is not None and not broker_panel_stored.empty:
+        from backend.scanner.volume_universe import day_frame_from_broker_panel
+
+        vol_bp = day_frame_from_broker_panel(broker_panel_stored, latest_date)
+        if not vol_bp.empty:
+            for col in ("daily_volume", "daily_turnover_lac", "float_turnover_1d_abs"):
+                if col in signals.columns:
+                    signals = signals.drop(columns=[col], errors="ignore")
+            signals = signals.merge(
+                vol_bp[["symbol", "daily_volume", "daily_turnover_lac", "float_turnover_1d_abs", "ltp"]],
+                on="symbol",
+                how="left",
+                suffixes=("", "_bp"),
+            )
+            if "ltp_bp" in signals.columns:
+                signals["ltp"] = signals["ltp"].fillna(signals["ltp_bp"])
+                signals.drop(columns=["ltp_bp"], inplace=True, errors="ignore")
+    signals = attach_broker_metrics(signals, vol_panel)
+    score_cols = [
         "floorsheet_momentum_score",
         "early_momentum_score",
         "distribution_risk_score",
@@ -135,15 +151,37 @@ def run_pipeline(
         "acc_dist_ratio",
         "ofi",
         "mtf_convergence",
-    ):
-        if col in latest_features.columns and col not in signals.columns:
-            signals[col] = latest_features[col].values
+        "float_turnover_zscore",
+    ]
+    feat_scores = latest_features[["symbol"] + [c for c in score_cols if c in latest_features.columns]].drop_duplicates(
+        "symbol"
+    )
+    signals = signals.drop(columns=[c for c in score_cols if c in signals.columns], errors="ignore")
+    signals = signals.merge(feat_scores, on="symbol", how="left")
+    from backend.config_signals import get_signal_config
+    from backend.signals.effective_scores import effective_scores
+
+    cfg = get_signal_config()
+
+    def _eff_row(row: pd.Series) -> pd.Series:
+        p, ems, _ = effective_scores(row, cfg)
+        return pd.Series({"p_long_momentum": p, "early_momentum_score": ems})
+
+    eff = signals.apply(_eff_row, axis=1)
+    signals["p_long_momentum"] = eff["p_long_momentum"].values
+    signals["early_momentum_score"] = eff["early_momentum_score"].values
+    signals["early_rank_score"] = compute_early_rank_score(signals)
+    signals = signals.sort_values("daily_turnover_lac", ascending=False)
+    turn = pd.to_numeric(signals["daily_turnover_lac"], errors="coerce").fillna(0)
+    signals["volume_rank"] = turn.rank(ascending=False, method="min").astype("Int64")
+    signals["signal_tier"] = assign_universe_tiers(signals)
     store.save_predictions(signals)
 
     rag = SimpleRAG()
     rag.index_outcomes(features, labels)
 
-    psum = panel_side_summary(full_panel)
+    psum = panel_side_summary(store.load_panel())
+    psum_snap = panel_side_summary(full_panel)
     fs_mean = float(features["floorsheet_momentum_score"].mean()) if "floorsheet_momentum_score" in features.columns else 0.0
     panel_syms = int(full_panel["symbol"].nunique()) if not full_panel.empty else 0
     broker_syms = int(broker_panel_stored["symbol"].nunique()) if not broker_panel_stored.empty else 0
@@ -159,5 +197,9 @@ def run_pipeline(
         "multimodal_meta": mm_meta,
         "data_inventory": inv,
         "panel_sides": psum,
+        "panel_sides_snapshot": psum_snap,
         "floorsheet_score_avg": round(fs_mean, 1),
+        "ingest_source": ingest_meta.get("source", "unknown"),
+        "ingest_folder": ingest_meta.get("folder", ""),
+        "panel_repaired": panel_repaired,
     }

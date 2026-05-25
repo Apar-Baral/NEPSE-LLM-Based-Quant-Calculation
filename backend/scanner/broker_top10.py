@@ -21,9 +21,11 @@ def _broker_cfg() -> dict:
 
 def discover_top_brokers(broker_panel: pd.DataFrame, horizon: str = "1D", top_n: int | None = None) -> list[str]:
     """Rank brokers by total market activity (mathematical discovery)."""
-    top_n = top_n or _broker_cfg()["analyze_top_n"]
+    cfg_n = _broker_cfg()["analyze_top_n"]
+    top_n = cfg_n if top_n is None else top_n
     if broker_panel.empty:
-        return _broker_cfg()["watch_list"][:top_n]
+        watch = _broker_cfg()["watch_list"]
+        return watch if top_n <= 0 else watch[:top_n]
 
     sub = broker_panel[broker_panel["horizon"] == horizon].copy() if "horizon" in broker_panel.columns else broker_panel.copy()
     if sub.empty:
@@ -38,17 +40,15 @@ def discover_top_brokers(broker_panel: pd.DataFrame, horizon: str = "1D", top_n:
             + pd.to_numeric(sub["sell_qty"], errors="coerce").fillna(0),
         )
 
-    agg = (
-        sub.groupby("broker_id")["activity_qty"]
-        .sum()
-        .sort_values(ascending=False)
-        .head(top_n)
-    )
+    agg = sub.groupby("broker_id")["activity_qty"].sum().sort_values(ascending=False)
+    if top_n and int(top_n) > 0:
+        agg = agg.head(int(top_n))
     discovered = list(agg.index.astype(str))
-    # Merge with configured watch list (preserve order: discovered first, then watch extras)
     watch = _broker_cfg()["watch_list"]
     merged = discovered + [b for b in watch if b not in discovered]
-    return merged[:top_n]
+    if top_n and int(top_n) > 0:
+        return merged[: int(top_n)]
+    return merged
 
 
 def analyze_broker_row(broker_id: str, grp: pd.DataFrame, symbol_activity: float) -> dict:
@@ -94,7 +94,8 @@ def symbol_top_brokers_table(
     top_n: int | None = None,
 ) -> pd.DataFrame:
     """Full mathematical breakdown for top N brokers on a symbol."""
-    top_n = top_n or _broker_cfg()["analyze_top_n"]
+    cfg_n = _broker_cfg()["analyze_top_n"]
+    top_n = cfg_n if top_n is None else top_n
     if broker_panel.empty:
         return pd.DataFrame()
 
@@ -113,7 +114,11 @@ def symbol_top_brokers_table(
         + pd.to_numeric(sub.get("sell_qty", 0), errors="coerce").fillna(0).sum()
     )
 
-    top_ids = discover_top_brokers(broker_panel, horizon, top_n)
+    use_all = not top_n or int(top_n) <= 0
+    if use_all:
+        top_ids = sorted(sub["broker_id"].unique().astype(str))
+    else:
+        top_ids = discover_top_brokers(broker_panel, horizon, top_n)
     rows = []
     for bid in top_ids:
         grp = sub[sub["broker_id"] == bid]
@@ -141,15 +146,14 @@ def symbol_top_brokers_table(
             rows.append(analyze_broker_row(bid, grp, total_act))
 
     df = pd.DataFrame(rows)
-    # Also include any other high-activity brokers on symbol not in top market list
-    other = sub[~sub["broker_id"].isin(top_ids)]
-    if not other.empty:
-        for bid, grp in other.groupby("broker_id"):
-            act = grp["buy_qty"].sum() + grp["sell_qty"].sum() if "buy_qty" in grp.columns else 0
-            if act >= total_act * 0.05:
-                rows.append(analyze_broker_row(str(bid), grp, total_act))
-        df = pd.DataFrame(rows).sort_values("conviction_score", ascending=False).head(top_n + 5)
-
+    if not use_all:
+        other = sub[~sub["broker_id"].isin(top_ids)]
+        if not other.empty:
+            for bid, grp in other.groupby("broker_id"):
+                act = grp["buy_qty"].sum() + grp["sell_qty"].sum() if "buy_qty" in grp.columns else 0
+                if act >= total_act * 0.05:
+                    rows.append(analyze_broker_row(str(bid), grp, total_act))
+            df = pd.DataFrame(rows)
     return df.sort_values("conviction_score", ascending=False)
 
 

@@ -17,9 +17,12 @@ from backend.scanner.broker_top10 import discover_top_brokers, symbol_top_broker
 from backend.scanner.broker_insights import horizon_net_flow
 from backend.scanner.symbol_lookup import enrich_symbol_row
 from backend.models.trainer import compute_shap_values
+from backend.config import load_yaml_config
 from backend.quant.algorithm_specs import spec_for_step
 from frontend.display_config import TIER_COLORS, TIER_HELP
 from frontend.ui_theme import PLOTLY_ZOOM_CONFIG
+
+_HORIZON_ORDER = [h["key"] for h in load_yaml_config("horizons.yaml")["horizons"]]
 
 
 def _turnover_peer_figure(sym: str, universe_df: pd.DataFrame) -> go.Figure | None:
@@ -67,17 +70,32 @@ def _col(df: pd.DataFrame, name: str, default=0.0) -> pd.Series:
     return pd.Series(default, index=df.index)
 
 
-def _horizon_heatmap(sym_panel: pd.DataFrame, sym: str) -> go.Figure | None:
+def _latest_side_panel(sym_panel: pd.DataFrame) -> pd.DataFrame:
+    """One row per side × horizon (latest report_date)."""
     if sym_panel.empty:
+        return sym_panel
+    p = sym_panel.copy()
+    p["report_date"] = pd.to_datetime(p["report_date"]).dt.normalize()
+    return (
+        p.sort_values("report_date")
+        .groupby(["side", "horizon"], as_index=False)
+        .last()
+    )
+
+
+def _horizon_heatmap(sym_panel: pd.DataFrame, sym: str) -> go.Figure | None:
+    snap = _latest_side_panel(sym_panel)
+    if snap.empty:
         return None
     rows = []
     for side in ("accumulation", "distribution"):
-        sub = sym_panel[sym_panel["side"] == side] if "side" in sym_panel.columns else sym_panel
+        sub = snap[snap["side"] == side] if "side" in snap.columns else snap
+        label = "acc" if side == "accumulation" else "dis"
         for _, r in sub.iterrows():
             rows.append(
                 {
-                    "horizon": r.get("horizon", "?"),
-                    "side": side[:3],
+                    "horizon": str(r.get("horizon", "?")),
+                    "side": label,
                     "net_lac": float(pd.to_numeric(r.get("net_amount_sum", 0), errors="coerce") or 0),
                 }
             )
@@ -85,14 +103,58 @@ def _horizon_heatmap(sym_panel: pd.DataFrame, sym: str) -> go.Figure | None:
         return None
     df = pd.DataFrame(rows)
     pivot = df.pivot_table(index="side", columns="horizon", values="net_lac", aggfunc="sum").fillna(0)
-    order = ["1D", "2D", "3D", "4D", "1W", "1M", "3M"]
-    cols = [c for c in order if c in pivot.columns] + [c for c in pivot.columns if c not in order]
-    return px.imshow(
-        pivot[cols],
-        title=f"{sym} — Acc/Dist heatmap",
-        color_continuous_scale="RdYlGn",
-        aspect="auto",
+    cols = [c for c in _HORIZON_ORDER if c in pivot.columns] + [c for c in pivot.columns if c not in _HORIZON_ORDER]
+    z = pivot[cols].values
+    zmax = max(abs(z.min()), abs(z.max()), 1.0)
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=cols,
+            y=list(pivot.index),
+            colorscale="RdBu",
+            zmid=0,
+            zmin=-zmax,
+            zmax=zmax,
+            colorbar=dict(title="Net Lac"),
+            hovertemplate="%{y} %{x}: %{z:.1f} Lac<extra></extra>",
+        )
     )
+    fig.update_layout(
+        title=f"{sym} — Accumulation vs distribution (net Lac, green = inflow)",
+        height=220,
+        margin=dict(l=60, r=20, t=40, b=40),
+    )
+    return fig
+
+
+def _side_ladder_chart(sym_panel: pd.DataFrame, sym: str, side: str, title: str) -> go.Figure | None:
+    from backend.scanner.broker_insights import horizon_net_flow
+
+    flow = horizon_net_flow(sym_panel, side)
+    if flow.empty:
+        return None
+    colors = {"Heavy": "#ef4444", "Medium": "#f59e0b", "Light": "#58a6ff"}
+    bar_colors = [colors.get(str(p), "#888") for p in flow.get("power", "—")]
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=flow["horizon"].tolist(),
+                y=flow["net_lac"].tolist(),
+                marker_color=bar_colors,
+                text=[f"{v:+.0f}" for v in flow["net_lac"]],
+                textposition="outside",
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        xaxis_title="Horizon",
+        yaxis_title="Net Lac",
+        height=320,
+        bargap=0.15,
+    )
+    fig.add_hline(y=0, line_color="#666", line_width=1)
+    return fig
 
 
 def _render_algorithm_result(step: dict) -> None:
@@ -189,10 +251,12 @@ def render_symbol_deep_dive(
     from backend.ingest.data_inventory import data_folder_inventory
 
     inv = data_folder_inventory()
-    if fs <= 0 or ems_raw <= 0:
+    if inv.get("uses_all_in_one") and inv.get("has_true_accumulation"):
+        st.caption("Data: **All in one Data** (accumulation + distribution loaded).")
+    elif fs <= 0 or ems_raw <= 0:
         st.warning(
             f"Limited floorsheet depth — {inv.get('message', '')} "
-            "Add accumulation CSVs under `Data/Accumulation Data/` and run pipeline."
+            "Add CSVs under `Data/All in one Data/` and run pipeline."
         )
     elif fs > 0 and not inv.get("has_true_accumulation"):
         st.caption("Floorsheet scores use distribution-proxy until accumulation files are loaded.")
@@ -208,29 +272,38 @@ def render_symbol_deep_dive(
     with tab_t:
         from backend.scanner.early_momentum_trace import trace_early_momentum
 
-        trace = trace_early_momentum(sym, features, preds)
+        trace = trace_early_momentum(sym, features, preds, panel=panel)
         st.markdown(f"### {trace['stage']}")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Lead score", f"{trace['lead_score']}/100")
         c2.metric("History days", len(trace["timeline"]))
+        c3.metric("Source", trace.get("history_source", "features"))
         st.markdown(trace["summary"])
         if trace["events"]:
             st.markdown("**What fired (chronological)**")
             st.dataframe(pd.DataFrame(trace["events"]), hide_index=True, use_container_width=True)
+        elif len(trace["timeline"]) < 2:
+            st.info("Need 2+ upload days in panel — add more CSVs to **All in one Data** and run pipeline.")
         else:
-            st.info("No momentum events yet — need 2+ report dates in features/predictions.")
+            st.info("History loaded but no threshold events yet — metrics are stable day-to-day.")
         tl = trace["timeline"]
-        if not tl.empty and len(tl) >= 2:
-            plot_cols = [c for c in ("early_momentum_score", "floorsheet_momentum_score", "daily_turnover_lac", "broker_pressure") if c in tl.columns]
-            if plot_cols:
+        if not tl.empty:
+            plot_cols = [c for c in ("early_momentum_score", "floorsheet_momentum_score", "daily_turnover_lac", "broker_pressure", "p_long_momentum") if c in tl.columns]
+            if plot_cols and len(tl) >= 2:
                 melt = tl.melt(id_vars=["report_date"], value_vars=plot_cols, var_name="metric", value_name="value")
                 st.plotly_chart(
                     px.line(melt, x="report_date", y="value", color="metric", markers=True, title=f"{sym} — momentum trace"),
                     use_container_width=True,
+                    config=PLOTLY_ZOOM_CONFIG,
+                )
+            elif len(plot_cols) == 1:
+                st.plotly_chart(
+                    px.bar(tl, x="report_date", y=plot_cols[0], title=f"{sym} — {plot_cols[0]} (latest snapshot)"),
+                    use_container_width=True,
+                    config=PLOTLY_ZOOM_CONFIG,
                 )
         st.caption(
-            "Tracks EMS jumps, turnover surges, tier upgrades, shakeout, and broker pressure — "
-            "upload more daily files to lengthen the trace."
+            "Tracks EMS jumps, turnover surges, tier upgrades, shakeout, and broker pressure across upload dates."
         )
 
     with tab_v:
@@ -255,11 +328,21 @@ def render_symbol_deep_dive(
             st.caption(f"Demand OB: {pa_step['demand_zone']:.2f} | Supply: {pa_step.get('supply_zone')}")
         hm = _horizon_heatmap(sym_panel, sym)
         if hm:
-            st.plotly_chart(hm, use_container_width=True)
+            st.plotly_chart(hm, use_container_width=True, config=PLOTLY_ZOOM_CONFIG)
         if not sym_panel.empty:
-            dist_flow = horizon_net_flow(sym_panel, "distribution")
-            if not dist_flow.empty:
-                st.plotly_chart(px.bar(dist_flow, x="horizon", y="net_lac", color="power", title="Distribution ladder"), use_container_width=True)
+            lc1, lc2 = st.columns(2)
+            acc_fig = _side_ladder_chart(sym_panel, sym, "accumulation", f"{sym} — Accumulation ladder")
+            dist_fig = _side_ladder_chart(sym_panel, sym, "distribution", f"{sym} — Distribution ladder")
+            with lc1:
+                if acc_fig:
+                    st.plotly_chart(acc_fig, use_container_width=True, config=PLOTLY_ZOOM_CONFIG)
+                else:
+                    st.caption("No accumulation horizons in panel.")
+            with lc2:
+                if dist_fig:
+                    st.plotly_chart(dist_fig, use_container_width=True, config=PLOTLY_ZOOM_CONFIG)
+                else:
+                    st.caption("No distribution horizons in panel.")
         shap = compute_shap_values(sym_feat, sym) if not sym_feat.empty else {}
         if shap:
             shap_df = pd.DataFrame({"feature": list(shap.keys()), "shap": list(shap.values())})
@@ -294,9 +377,12 @@ def render_symbol_deep_dive(
                 help="1W/1M often show higher absorption on rallying names than 1D alone.",
                 key=f"broker_hz_{sym}",
             )
-            top10_ids = discover_top_brokers(broker_panel, horizon=br_horizon, top_n=10)
-            st.caption(f"**Top 10 brokers** ({br_horizon} activity): {', '.join(top10_ids)}")
-            btable = symbol_top_brokers_table(sym, broker_panel, horizon=br_horizon, top_n=10)
+            show_all_br = st.checkbox("Show all brokers on this symbol", value=True, key=f"all_br_{sym}")
+            br_n = 0 if show_all_br else 10
+            top_ids = discover_top_brokers(broker_panel, horizon=br_horizon, top_n=br_n)
+            label = "All brokers" if show_all_br else f"Top {len(top_ids)} brokers"
+            st.caption(f"**{label}** ({br_horizon} market activity): {', '.join(top_ids[:15])}{'…' if len(top_ids) > 15 else ''}")
+            btable = symbol_top_brokers_table(sym, broker_panel, horizon=br_horizon, top_n=br_n)
             if not btable.empty:
                 show_cols = [
                     c
@@ -323,8 +409,9 @@ def render_symbol_deep_dive(
                 if not active.empty:
                     st.plotly_chart(
                         px.bar(active, x="broker_id", y="conviction_score", color="bias",
-                               title=f"{sym} — top 10 broker conviction"),
+                               title=f"{sym} — broker conviction ({len(active)} desks)"),
                         use_container_width=True,
+                        config=PLOTLY_ZOOM_CONFIG,
                     )
                 else:
                     st.caption("Top-10 market brokers listed; this symbol had no 1D qty on those desks.")
@@ -398,10 +485,10 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                     if domain_filter != "all":
                         adf = adf[adf["domain"] == domain_filter]
                     st.dataframe(
-                        adf[["agent_id", "domain", "score", "signal", "status", "summary"]].head(120),
+                        adf[["agent_id", "domain", "score", "signal", "status", "summary"]],
                         hide_index=True,
                         use_container_width=True,
-                        height=320,
+                        height=min(520, 36 + 28 * len(adf)),
                     )
 
                 from frontend.knowledge_viz import build_comprehensive_figure
@@ -420,10 +507,14 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                 st.caption("Open sidebar → **Knowledge Graph** for full interactive graph + vector search.")
 
     with tab_l:
+        adv_text_key = f"llm_adv_text_{sym}"
+        report_key = f"llm_report_{sym}"
+        quant_llm_key = f"quant_llm_{sym}"
+
         if not llm_status().get("ready"):
             st.warning("Set DEEPSEEK_API_KEY in .env for live LLM steps.")
         q = st.text_area("Question", value=f"I hold {sym}. Should I add, hold, or exit for early momentum?", key=f"q_{sym}")
-        if st.button("Get LLM advice", type="primary", key=f"adv_{sym}"):
+        if st.button("Get LLM advice", type="primary", key=f"btn_llm_adv_{sym}"):
             import importlib
             uni = universe_df if universe_df is not None and not universe_df.empty else enriched
             with st.spinner("LLM…"):
@@ -433,16 +524,17 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                     else enriched
                 )
                 ans = importlib.import_module("backend.llm.analyst").chat_query(q, uni_merged)
-            st.session_state[f"adv_{sym}"] = ans
-        if st.session_state.get(f"adv_{sym}"):
-            st.markdown(st.session_state[f"adv_{sym}"])
-        if st.button("Run LLM verification on all quant steps", key=f"vfy_{sym}"):
+            st.session_state[adv_text_key] = ans
+        if st.session_state.get(adv_text_key):
+            st.markdown(st.session_state[adv_text_key])
+        if st.button("Run LLM verification on all quant steps", key=f"btn_vfy_{sym}"):
             with st.spinner("Verifying…"):
                 q2 = run_quant_analysis(sym, row, sym_panel, broker_panel, universe_df, run_llm=True)
-            st.session_state[f"quant_llm_{sym}"] = q2
-        if st.session_state.get(f"quant_llm_{sym}"):
-            _render_quant_pipeline(st.session_state[f"quant_llm_{sym}"])
-        if st.button(f"Full report for {sym}", key=f"rep_{sym}"):
-            st.session_state[f"llm_report_{sym}"] = generate_symbol_report(row)
-        if st.session_state.get(f"llm_report_{sym}"):
-            st.markdown(st.session_state[f"llm_report_{sym}"])
+            st.session_state[quant_llm_key] = q2
+        if st.session_state.get(quant_llm_key):
+            _render_quant_pipeline(st.session_state[quant_llm_key])
+        if st.button(f"Full report for {sym}", key=f"btn_rep_{sym}"):
+            with st.spinner("Generating report…"):
+                st.session_state[report_key] = generate_symbol_report(row)
+        if st.session_state.get(report_key):
+            st.markdown(st.session_state[report_key])

@@ -108,7 +108,7 @@ def deploy_agent_fleet(
     except Exception:
         pass
     try:
-        tbl = symbol_top_brokers_table(sym, broker_panel, top_n=10)
+        tbl = symbol_top_brokers_table(sym, broker_panel, top_n=0)
         if not tbl.empty:
             broker_table = tbl.to_dict(orient="records")
     except Exception:

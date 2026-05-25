@@ -297,7 +297,7 @@ def expand_features_with_broker(
     panel_syms = set(features["symbol"].astype(str).str.upper())
     extra = proxy[~proxy["symbol"].astype(str).str.upper().isin(panel_syms)].copy()
     if extra.empty:
-        return features
+        return _add_composite_features(features)
 
     combined = pd.concat([features, extra], ignore_index=True)
     combined = combined.drop_duplicates(subset=["report_date", "symbol"], keep="first")
