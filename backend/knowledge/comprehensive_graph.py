@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from backend.agents.base import AgentResult, FleetReport
 from backend.knowledge.graph_store import LogicGraphStore
+
+if TYPE_CHECKING:
+    from backend.agents.base import FleetReport
 from backend.knowledge.llm_associations import llm_graph_associations, rule_based_associations
 from backend.knowledge.vector_rag import VectorLogicRAG
 
@@ -28,13 +30,14 @@ def _metric_node(sym: str, key: str, label: str, value: Any, domain: str) -> tup
 def build_comprehensive_knowledge(
     sym: str,
     row: pd.Series,
-    fleet_report: FleetReport,
+    fleet_report: "FleetReport",
     quant_pipeline: dict | None = None,
     use_llm_associations: bool = False,
 ) -> LogicGraphStore:
     """Populate graph + vector index for one symbol (call after agent fleet)."""
     sym = str(sym).strip().upper()
     g = LogicGraphStore()
+    g.prune_symbol(sym)
     sid = g._nid("symbol", sym)
 
     tier = str(row.get("signal_tier", "Neutral"))
@@ -54,9 +57,9 @@ def build_comprehensive_knowledge(
         },
     )
 
-    # Domain hub nodes
+    # Domain hub nodes (per-symbol so graphs do not cross-link tickers)
     for dom in DOMAIN_HUBS:
-        hid = g._nid("domain", dom)
+        hid = g._nid("domain", f"{dom}:{sym}")
         score = fleet_report.domain_scores.get(dom, 50)
         sig = fleet_report.domain_signals.get(dom, "neutral")
         g._upsert_node(
@@ -69,7 +72,7 @@ def build_comprehensive_knowledge(
 
     # Top agents per domain (dynamic from fleet)
     for dom in DOMAIN_HUBS:
-        hid = g._nid("domain", dom)
+        hid = g._nid("domain", f"{dom}:{sym}")
         agents = [a for a in fleet_report.agents if a.domain == dom and a.status == "ok"]
         agents.sort(key=lambda a: a.score, reverse=True)
         for a in agents[:12]:
@@ -104,7 +107,7 @@ def build_comprehensive_knowledge(
                 step_name,
                 {"score": step.get("score"), "pass": step.get("pass"), "notes": step.get("notes", [])[:3]},
             )
-            g._add_edge(g._nid("domain", "quant"), pid, "includes_step", weight=(step.get("score") or 50) / 100)
+            g._add_edge(g._nid("domain", f"quant:{sym}"), pid, "includes_step", weight=(step.get("score") or 50) / 100)
             g._add_edge(sid, pid, "has_quant_step", weight=0.9)
             verdict = quant_pipeline.get("verdict", "")
             vid = g._nid("quant_verdict", sym)
@@ -128,7 +131,7 @@ def build_comprehensive_knowledge(
             continue
         nid, node = _metric_node(sym, key, label, val, dom)
         g._upsert_node(nid, node["kind"], node["label"], node["meta"])
-        g._add_edge(g._nid("domain", dom), nid, "measures", weight=0.7)
+        g._add_edge(g._nid("domain", f"{dom}:{sym}"), nid, "measures", weight=0.7)
         g._add_edge(sid, nid, "has_metric", weight=0.6)
 
     # Brokers from table
@@ -138,18 +141,19 @@ def build_comprehensive_knowledge(
             continue
         bid_node = g._nid("broker", bid)
         g._upsert_node(bid_node, "broker", f"Broker {bid}", {k: v for k, v in brow.items() if k != "broker_id"})
-        g._add_edge(g._nid("domain", "broker"), bid_node, "desk_activity", weight=(brow.get("conviction_score") or 0) / 100)
+        g._add_edge(g._nid("domain", f"broker:{sym}"), bid_node, "desk_activity", weight=(brow.get("conviction_score") or 0) / 100)
         g._add_edge(sid, bid_node, brow.get("bias", "flow"), weight=(brow.get("conviction_score") or 30) / 100, rationale=brow.get("flow_label", ""))
 
     # Tier + patterns
-    g._upsert_node(g._nid("signal", tier), "signal_tier", tier, {"source": "scanner"})
-    g._add_edge(sid, g._nid("signal", tier), "classified_as", weight=1.0)
+    tier_nid = g._nid("signal", f"{tier}:{sym}")
+    g._upsert_node(tier_nid, "signal_tier", tier, {"source": "scanner", "symbol": sym})
+    g._add_edge(sid, tier_nid, "classified_as", weight=1.0)
 
     if row.get("pattern_dist_shakeout") or row.get("dist_shakeout_flag"):
         pid = g._nid("pattern", f"shakeout:{sym}")
         g._upsert_node(pid, "pattern", "Dist shakeout", {"active": True})
         g._add_edge(sid, pid, "exhibits_pattern", weight=0.85)
-        g._add_edge(pid, g._nid("domain", "quant"), "informs", weight=0.7)
+        g._add_edge(pid, g._nid("domain", f"quant:{sym}"), "informs", weight=0.7)
 
     # Rule + optional LLM cross-links
     for link in rule_based_associations(
@@ -187,7 +191,7 @@ def build_comprehensive_knowledge(
     return g
 
 
-def _index_comprehensive_vectors(sym: str, row: pd.Series, fleet: FleetReport, quant: dict | None) -> None:
+def _index_comprehensive_vectors(sym: str, row: pd.Series, fleet: "FleetReport", quant: dict | None) -> None:
     rag = VectorLogicRAG()
     sym = sym.upper()
 
@@ -236,33 +240,53 @@ Dist risk: {row.get('distribution_risk_score')} | Broker pressure: {row.get('bro
     rag.save_fallback()
 
 
+def _blocks_symbol_hop(n: dict, sym: str) -> bool:
+    """True if BFS must not traverse this node (another ticker)."""
+    if n.get("kind") != "symbol":
+        return False
+    return n["id"] != f"symbol:{sym.upper()}"
+
+
 def subgraph_for_symbol(sym: str, depth: int = 2) -> dict:
-    """BFS subgraph including domain hubs, agents, brokers, metrics."""
+    """BFS subgraph for one symbol — never pulls in other tickers via shared hubs."""
     g = LogicGraphStore()
     sym = sym.upper()
     sid = g._nid("symbol", sym)
     if not any(n["id"] == sid for n in g.nodes):
-        return {"nodes": [], "edges": []}
+        return {"nodes": [], "edges": [], "symbol": sym, "depth": depth}
 
+    node_by_id = {n["id"]: n for n in g.nodes}
     seen_n = {sid}
     seen_e: set[tuple] = set()
     frontier = {sid}
-    all_edges = []
+    all_edges: list[dict] = []
 
     for _ in range(depth):
-        next_frontier = set()
+        next_frontier: set[str] = set()
         for e in g.edges:
             src, dst = e["source"], e["target"]
-            if src in frontier or dst in frontier:
-                key = (src, dst, e.get("relation", ""))
-                if key not in seen_e:
-                    seen_e.add(key)
-                    all_edges.append(e)
-                for nid in (src, dst):
-                    if nid not in seen_n:
-                        seen_n.add(nid)
-                        next_frontier.add(nid)
+            if src not in frontier and dst not in frontier:
+                continue
+            other = dst if src in frontier else src
+            other_node = node_by_id.get(other)
+            if other_node and other_node.get("kind") == "symbol" and other != sid:
+                continue
+            key = (src, dst, e.get("relation", ""))
+            if key not in seen_e:
+                seen_e.add(key)
+                all_edges.append(e)
+            for nid in (src, dst):
+                if nid in seen_n:
+                    continue
+                n = node_by_id.get(nid)
+                if n and _blocks_symbol_hop(n, sym):
+                    continue
+                seen_n.add(nid)
+                next_frontier.add(nid)
         frontier = next_frontier
 
-    nodes = [n for n in g.nodes if n["id"] in seen_n]
-    return {"nodes": nodes, "edges": all_edges, "symbol": sym, "depth": depth}
+    sid = g._nid("symbol", sym)
+    nodes = [n for n in g.nodes if n["id"] in seen_n and (n.get("kind") != "symbol" or n["id"] == sid)]
+    nids = {n["id"] for n in nodes}
+    edges = [e for e in all_edges if e["source"] in nids and e["target"] in nids]
+    return {"nodes": nodes, "edges": edges, "symbol": sym, "depth": depth}

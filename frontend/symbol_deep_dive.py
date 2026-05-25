@@ -17,8 +17,44 @@ from backend.scanner.broker_top10 import discover_top_brokers, symbol_top_broker
 from backend.scanner.broker_insights import horizon_net_flow
 from backend.scanner.symbol_lookup import enrich_symbol_row
 from backend.models.trainer import compute_shap_values
-from backend.quant.algorithms_catalog import ALGORITHM_SECTIONS
+from backend.quant.algorithm_specs import spec_for_step
 from frontend.display_config import TIER_COLORS, TIER_HELP
+
+
+def _turnover_peer_figure(sym: str, universe_df: pd.DataFrame) -> go.Figure | None:
+    """Bar chart of top-15 turnover; avoids px.bar color length mismatch (120 vs 15)."""
+    if universe_df.empty or "daily_turnover_lac" not in universe_df.columns:
+        return None
+
+    u = universe_df[["symbol", "daily_turnover_lac"]].copy()
+    u["symbol"] = u["symbol"].astype(str).str.upper()
+    u["daily_turnover_lac"] = pd.to_numeric(u["daily_turnover_lac"], errors="coerce").fillna(0)
+    u = u.drop_duplicates("symbol", keep="first")
+
+    top = u.nlargest(15, "daily_turnover_lac", keep="first").head(15).reset_index(drop=True)
+    sym_u = str(sym).strip().upper()
+    if sym_u not in set(top["symbol"]):
+        sel = u[u["symbol"] == sym_u].head(1)
+        if not sel.empty:
+            top = pd.concat([sel, top], ignore_index=True).drop_duplicates("symbol").head(15).reset_index(drop=True)
+
+    colors = ["#58a6ff" if s == sym_u else "#444444" for s in top["symbol"]]
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=top["symbol"].tolist(),
+                y=top["daily_turnover_lac"].tolist(),
+                marker_color=colors,
+            )
+        ]
+    )
+    fig.update_layout(
+        title="1D turnover vs top 15 (blue = selected)",
+        xaxis_title="Symbol",
+        yaxis_title="Turnover (Lac)",
+        height=360,
+    )
+    return fig
 
 
 def _col(df: pd.DataFrame, name: str, default=0.0) -> pd.Series:
@@ -28,29 +64,6 @@ def _col(df: pd.DataFrame, name: str, default=0.0) -> pd.Series:
         if f"{name}{suffix}" in df.columns:
             return df[f"{name}{suffix}"]
     return pd.Series(default, index=df.index)
-
-
-def _momentum_radar(row: pd.Series, quant: dict) -> go.Figure:
-    p = float(quant.get("p_long_display", row.get("p_long_momentum") or 0))
-    ems = float(quant.get("ems_display", row.get("early_momentum_score") or 0))
-    dims = {
-        "P(Long)": p * 100,
-        "LLM": (float(row.get("llm_p_long") or p) * 100),
-        "EMS": ems,
-        "Broker": float(row.get("broker_pressure") or 0),
-        "Volume": min(100, float(row.get("daily_turnover_lac") or 0) / 3),
-        "Floorsheet": float(row.get("floorsheet_momentum_score") or 0),
-    }
-    fig = go.Figure(
-        data=go.Scatterpolar(
-            r=list(dims.values()),
-            theta=list(dims.keys()),
-            fill="toself",
-            line_color="#58a6ff",
-        )
-    )
-    fig.update_layout(polar=dict(radialaxis=dict(range=[0, 100])), title="Momentum radar", height=360)
-    return fig
 
 
 def _horizon_heatmap(sym_panel: pd.DataFrame, sym: str) -> go.Figure | None:
@@ -81,37 +94,52 @@ def _horizon_heatmap(sym_panel: pd.DataFrame, sym: str) -> go.Figure | None:
     )
 
 
-def _render_quant_steps(quant: dict) -> None:
-    st.markdown(f"### {quant['verdict']} — composite **{quant['composite_score']}/100**")
-    st.caption(f"Steps passed: **{quant['steps_passed']}** / {quant['steps_total']} (need 3+ for high conviction)")
+def _render_algorithm_result(step: dict) -> None:
+    """One algorithm: what it used → score → conclusions (no raw variable dump)."""
+    name = step.get("step", "Step")
+    spec = spec_for_step(name)
+    passed = bool(step.get("pass"))
+    score = int(step.get("score", 0))
 
-    rows = []
-    for step in quant["steps"]:
-        rows.append(
-            {
-                "Step": step.get("step", ""),
-                "Score": step.get("score", 0),
-                "Pass": "Yes" if step.get("pass") else "No",
-                "Summary": "; ".join(step.get("notes", [])[:2])[:120],
-            }
+    st.markdown(f"#### {spec['title']}")
+    st.markdown("**Uses**")
+    for item in spec["uses"]:
+        st.markdown(f"- {item}")
+    st.markdown(f"**Produces:** {spec['gives']}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Score", f"{score}/100")
+    c2.metric("Pass", "Yes" if passed else "No")
+    c3.metric("Signal", "Bullish" if passed and score >= 60 else ("Mixed" if score >= 45 else "Weak"))
+
+    notes = step.get("notes") or []
+    if notes:
+        st.markdown("**Result**")
+        for n in notes:
+            st.markdown(f"- {n}")
+
+    if step.get("order_block_bias"):
+        st.caption(f"Order block: **{step['order_block_bias']}** · FVG bull={step.get('bullish_fvg')} bear={step.get('bearish_fvg')}")
+    if step.get("p_long_effective") is not None:
+        st.caption(
+            f"Momentum output: P(long) **{float(step['p_long_effective']):.0%}** · EMS **{float(step.get('ems_effective', 0)):.0f}**"
         )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    if step.get("circular_confirmed") or step.get("circular_flag"):
+        st.caption(f"Circular: **{step.get('verdict', 'checked')}**")
+    if step.get("verified") is not None:
+        st.caption(f"LLM verified: **{step.get('verified')}** (API: {step.get('api_used', False)})")
 
+    st.divider()
+
+
+def _render_quant_pipeline(quant: dict) -> None:
+    st.markdown(f"### {quant['verdict']}")
+    st.caption(
+        f"Composite **{quant['composite_score']}/100** · "
+        f"**{quant['steps_passed']}/{quant['steps_total']}** algorithms passed (need 3+ for high conviction)"
+    )
     for step in quant["steps"]:
-        icon = "✅" if step.get("pass") else "❌"
-        with st.expander(f"{icon} {step['step']} — {step.get('score')}/100", expanded=False):
-            for n in step.get("notes", []):
-                st.markdown(f"- {n}")
-            if step.get("order_block_bias"):
-                st.caption(
-                    f"Order block: {step.get('order_block_bias')} | "
-                    f"FVG bull={step.get('bullish_fvg')} bear={step.get('bearish_fvg')}"
-                )
-            if step.get("p_long_effective") is not None:
-                st.caption(
-                    f"Effective P(long) **{float(step['p_long_effective']):.0%}** "
-                    f"(raw {float(step.get('p_long_raw', 0)):.0%}) · EMS **{float(step.get('ems_effective', 0)):.0f}**"
-                )
+        _render_algorithm_result(step)
 
 
 def render_symbol_deep_dive(
@@ -124,7 +152,9 @@ def render_symbol_deep_dive(
     run_llm_verify: bool = False,
 ) -> None:
     sym = str(sym).strip().upper()
-    enriched = enrich_symbol_row(sym, preds, panel, broker_panel, features=features)
+    enriched = enrich_symbol_row(
+        sym, preds, panel, broker_panel, features=features, universe_df=universe_df
+    )
     if enriched.empty:
         st.error(f"No data for **{sym}**. Run pipeline or check symbol.")
         return
@@ -148,15 +178,10 @@ def render_symbol_deep_dive(
         unsafe_allow_html=True,
     )
 
-    c0, c1, c2, c3, c4, c5, c6, c7 = st.columns(8)
-    c0.metric("Quant confirmation", f"{conf_score}/100")
-    c1.metric("P(Long) eff.", f"{p_show:.0%}")
-    c2.metric("LLM P(Long)", f"{float(row.get('llm_p_long')):.0%}" if pd.notna(row.get("llm_p_long")) else "—")
-    c3.metric("1D Turnover", f"{float(row.get('daily_turnover_lac') or 0):,.0f} Lac")
-    c4.metric("EMS eff.", f"{ems_show:.0f}")
-    c5.metric("Broker Δ", f"{float(row.get('broker_pressure') or 0):.0f}")
-    c6.metric("Floorsheet", f"{float(row.get('floorsheet_momentum_score') or 0):.0f}")
-    c7.metric("LTP", f"{float(row.get('ltp')):.2f}" if pd.notna(row.get("ltp")) else "—")
+    c0, c1, c2 = st.columns(3)
+    c0.metric("Composite", f"{conf_score}/100")
+    c1.metric("Verdict", quant["verdict"][:28] + ("…" if len(quant["verdict"]) > 28 else ""))
+    c2.metric("Steps passed", f"{quant['steps_passed']}/{quant['steps_total']}")
 
     fs = float(row.get("floorsheet_momentum_score") or 0)
     ems_raw = float(row.get("early_momentum_score") or 0)
@@ -165,75 +190,60 @@ def render_symbol_deep_dive(
     inv = data_folder_inventory()
     if fs <= 0 or ems_raw <= 0:
         st.warning(
-            f"**Floorsheet {fs:.0f} / EMS {ems_raw:.0f}** — {inv.get('message', '')} "
-            "Click **Run Pipeline** after placing accumulation CSVs in `Data/Accumulation Data/`."
+            f"Limited floorsheet depth — {inv.get('message', '')} "
+            "Add accumulation CSVs under `Data/Accumulation Data/` and run pipeline."
         )
     elif fs > 0 and not inv.get("has_true_accumulation"):
-        st.caption(f"Floorsheet **{fs:.0f}** = distribution-proxy score (accumulation folder still empty).")
+        st.caption("Floorsheet scores use distribution-proxy until accumulation files are loaded.")
 
-    with st.expander("Score breakdown (raw vs effective)", expanded=False):
-        raw_p = float(row.get("p_long_momentum_raw") or row.get("p_long_momentum") or 0)
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {"Metric": "P(long) raw (ML)", "Value": f"{raw_p:.0%}" if raw_p <= 1 else f"{raw_p:.1f}%"},
-                    {"Metric": "P(long) effective", "Value": f"{p_show:.0%}"},
-                    {"Metric": "EMS effective", "Value": f"{ems_show:.0f}"},
-                    {"Metric": "Floorsheet score", "Value": f"{fs:.0f}"},
-                    {"Metric": "Dist risk", "Value": f"{float(row.get('distribution_risk_score') or 0):.0f}"},
-                    {"Metric": "Signal tier", "Value": str(tier)},
-                ]
-            ),
-            hide_index=True,
-            use_container_width=True,
-        )
-
-    tab_q, tab_v, tab_c, tab_b, tab_l = st.tabs(
-        ["Quant pipeline", "Volume", "Floorsheet & PA", "Brokers", "LLM advisor"]
+    tab_q, tab_t, tab_v, tab_c, tab_b, tab_l = st.tabs(
+        ["Algorithms", "Early momentum trace", "Volume chart", "Floorsheet ladder", "Brokers", "LLM advisor"]
     )
 
     with tab_q:
-        with st.expander("Algorithms in this pipeline", expanded=False):
-            for sec in ALGORITHM_SECTIONS[:4]:
-                st.markdown(f"**{sec['title']}** — " + "; ".join(sec["items"][:4]) + " …")
-        _render_quant_steps(quant)
-        col_l, col_r = st.columns(2)
-        with col_l:
-            st.plotly_chart(_momentum_radar(row, quant), use_container_width=True)
-        with col_r:
-            st.plotly_chart(
-                go.Figure(
-                    go.Indicator(
-                        mode="gauge+number",
-                        value=conf_score,
-                        title={"text": "Composite confirmation"},
-                        gauge={
-                            "axis": {"range": [0, 100]},
-                            "bar": {"color": "#2ecc71" if conf_score >= 60 else "#e67e22"},
-                        },
-                    )
-                ),
-                use_container_width=True,
-            )
+        st.caption("Each block: **what the algorithm uses** → **score** → **what it concluded**.")
+        _render_quant_pipeline(quant)
+
+    with tab_t:
+        from backend.scanner.early_momentum_trace import trace_early_momentum
+
+        trace = trace_early_momentum(sym, features, preds)
+        st.markdown(f"### {trace['stage']}")
+        c1, c2 = st.columns(2)
+        c1.metric("Lead score", f"{trace['lead_score']}/100")
+        c2.metric("History days", len(trace["timeline"]))
+        st.markdown(trace["summary"])
+        if trace["events"]:
+            st.markdown("**What fired (chronological)**")
+            st.dataframe(pd.DataFrame(trace["events"]), hide_index=True, use_container_width=True)
+        else:
+            st.info("No momentum events yet — need 2+ report dates in features/predictions.")
+        tl = trace["timeline"]
+        if not tl.empty and len(tl) >= 2:
+            plot_cols = [c for c in ("early_momentum_score", "floorsheet_momentum_score", "daily_turnover_lac", "broker_pressure") if c in tl.columns]
+            if plot_cols:
+                melt = tl.melt(id_vars=["report_date"], value_vars=plot_cols, var_name="metric", value_name="value")
+                st.plotly_chart(
+                    px.line(melt, x="report_date", y="value", color="metric", markers=True, title=f"{sym} — momentum trace"),
+                    use_container_width=True,
+                )
+        st.caption(
+            "Tracks EMS jumps, turnover surges, tier upgrades, shakeout, and broker pressure — "
+            "upload more daily files to lengthen the trace."
+        )
+
     with tab_v:
         vol_step = quant["steps"][0]
         for n in vol_step.get("notes", []):
             st.markdown(f"- {n}")
         if universe_df is not None and not universe_df.empty and "daily_turnover_lac" in universe_df.columns:
-            top15 = universe_df.nlargest(15, "daily_turnover_lac").copy()
-            top15["symbol"] = top15["symbol"].astype(str).str.upper()
-            top15["highlight"] = top15["symbol"] == sym
-            st.plotly_chart(
-                px.bar(
-                    top15,
-                    x="symbol",
-                    y="daily_turnover_lac",
-                    color="highlight",
-                    title="1D turnover vs top 15 (highlight = selected)",
-                    color_discrete_map={True: "#58a6ff", False: "#444"},
-                ),
-                use_container_width=True,
-            )
+            turn = float(pd.to_numeric(row.get("daily_turnover_lac"), errors="coerce") or 0)
+            u_turn = pd.to_numeric(universe_df["daily_turnover_lac"], errors="coerce").fillna(0)
+            pct = float((u_turn < turn).mean() * 100) if u_turn.max() > 0 else 0.0
+            st.caption(f"Turnover vs top-120 universe: **top {pct:.0f}%** by 1D Lac")
+            fig_peer = _turnover_peer_figure(sym, universe_df)
+            if fig_peer is not None:
+                st.plotly_chart(fig_peer, use_container_width=True)
 
     with tab_c:
         pa_step = quant["steps"][2]
@@ -371,9 +381,9 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                     )
 
                 from frontend.knowledge_viz import build_comprehensive_figure
-                from backend.knowledge.comprehensive_graph import subgraph_for_symbol
+                from backend.knowledge.comprehensive_graph import subgraph_for_symbol as _subgraph
 
-                g = subgraph_for_symbol(sym, depth=2)
+                g = _subgraph(sym, depth=2)
                 st.caption(
                     f"Comprehensive graph: **{len(g['nodes'])}** nodes · **{len(g['edges'])}** edges "
                     f"(agents, metrics, domains, brokers, LLM links)"
@@ -402,7 +412,7 @@ They run together in ~1 second and vote **bullish / bearish / neutral** with a *
                 q2 = run_quant_analysis(sym, row, sym_panel, broker_panel, universe_df, run_llm=True)
             st.session_state[f"quant_llm_{sym}"] = q2
         if st.session_state.get(f"quant_llm_{sym}"):
-            _render_quant_steps(st.session_state[f"quant_llm_{sym}"])
+            _render_quant_pipeline(st.session_state[f"quant_llm_{sym}"])
         if st.button(f"Full report for {sym}", key=f"rep_{sym}"):
             st.session_state[f"llm_report_{sym}"] = generate_symbol_report(row)
         if st.session_state.get(f"llm_report_{sym}"):

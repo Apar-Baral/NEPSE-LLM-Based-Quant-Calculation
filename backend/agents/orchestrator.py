@@ -7,11 +7,12 @@ from typing import Any
 import pandas as pd
 
 from backend.agents.fleet import deploy_agent_fleet, fleet_status
-from backend.knowledge.comprehensive_graph import build_comprehensive_knowledge, subgraph_for_symbol
 from backend.llm.analyst import llm_status
 
 
 def _index_knowledge(sym: str, fleet_report, row: pd.Series, use_llm: bool = False) -> dict:
+    from backend.knowledge.comprehensive_graph import build_comprehensive_knowledge, subgraph_for_symbol
+
     quant = fleet_report.quant_pipeline or {}
     use_llm = use_llm or llm_status().get("ready", False)
     build_comprehensive_knowledge(

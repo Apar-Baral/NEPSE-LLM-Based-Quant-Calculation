@@ -31,7 +31,7 @@ def rule_based_associations(
         links.append({"source": src, "target": dst, "relation": rel, "weight": weight, "rationale": rationale})
 
     sid = f"symbol:{sym}"
-    qh, fh, bh, lh = "domain:quant", "domain:financial", "domain:broker", "domain:llm"
+    qh, fh, bh, lh = f"domain:quant:{sym}", f"domain:financial:{sym}", f"domain:broker:{sym}", f"domain:llm:{sym}"
 
     if q_sig == f_sig == "bullish":
         _link(qh, fh, "confirms", 0.85, "Quant and financial domains aligned bullish")
@@ -56,7 +56,7 @@ def rule_based_associations(
         _link(bh, sid, "invalidates_reliability", 0.9, "Confirmed circular trading on broker flow")
 
     tier = str(row.get("signal_tier", "Neutral"))
-    _link(sid, f"signal:{tier}", "classified_as", 1.0, f"Scanner tier {tier}")
+    _link(sid, f"signal:{tier}:{sym}", "classified_as", 1.0, f"Scanner tier {tier}")
 
     return links
 

@@ -90,6 +90,28 @@ class LogicGraphStore:
                 rationale=str(row.get("flow_label", "")),
             )
 
+    def prune_symbol(self, sym: str) -> int:
+        """Remove one symbol's nodes/edges so rebuild does not leak other tickers."""
+        sym = str(sym).strip().upper()
+        sid = self._nid("symbol", sym)
+        remove: set[str] = set()
+
+        for n in self.nodes:
+            nid = n["id"]
+            if nid == sid:
+                remove.add(nid)
+                continue
+            if n.get("kind") == "symbol" and nid != sid:
+                continue
+            meta = n.get("meta") or {}
+            if meta.get("symbol") == sym or f":{sym}" in nid or nid.endswith(f":{sym}"):
+                remove.add(nid)
+
+        before = len(self.nodes)
+        self.nodes = [n for n in self.nodes if n["id"] not in remove]
+        self.edges = [e for e in self.edges if e["source"] not in remove and e["target"] not in remove]
+        return before - len(self.nodes)
+
     def save(self) -> None:
         GRAPH_PATH.parent.mkdir(parents=True, exist_ok=True)
         self.meta["node_count"] = len(self.nodes)

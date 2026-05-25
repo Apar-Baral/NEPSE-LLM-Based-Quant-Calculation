@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from backend.db.store import DataStore
-from backend.features.engineer import build_daily_feature_matrix
+from backend.features.engineer import build_daily_feature_matrix, expand_features_with_broker
 from backend.features.pattern_library import build_pattern_store, enrich_with_analogs
 from backend.scanner.broker_insights import attach_broker_metrics
 from backend.scanner.volume_universe import attach_volume_from_panel, compute_early_rank_score, get_latest_scanner_universe
@@ -85,7 +85,10 @@ def run_pipeline(
         if not bp.empty:
             store.save_broker_panel(bp)
 
+    broker_panel_stored = store.load_broker_panel()
     features = build_daily_feature_matrix(full_panel)
+    latest_rd = features["report_date"].max() if not features.empty else pd.Timestamp(rd)
+    features = expand_features_with_broker(features, broker_panel_stored, report_date=latest_rd)
     store.save_features(features)
 
     ohlcv = store.load_ohlcv()
@@ -102,7 +105,6 @@ def run_pipeline(
 
     meta = {}
     mm_meta = {}
-    broker_panel_stored = store.load_broker_panel()
     if retrain and labels["long_momentum_10d"].sum() > 0 and len(features) > 20:
         try:
             meta = train_models(features, labels)
@@ -143,10 +145,15 @@ def run_pipeline(
 
     psum = panel_side_summary(full_panel)
     fs_mean = float(features["floorsheet_momentum_score"].mean()) if "floorsheet_momentum_score" in features.columns else 0.0
+    panel_syms = int(full_panel["symbol"].nunique()) if not full_panel.empty else 0
+    broker_syms = int(broker_panel_stored["symbol"].nunique()) if not broker_panel_stored.empty else 0
     return {
         "status": "ok",
         "report_date": str(latest_date.date()) if pd.notna(latest_date) else str(rd),
         "symbols": int(signals["symbol"].nunique()),
+        "panel_symbols": panel_syms,
+        "broker_symbols": broker_syms,
+        "feature_symbols": int(features["symbol"].nunique()) if not features.empty else 0,
         "trigger_count": int(signals[signals["signal_tier"].isin(["Trigger", "Confirmed"])].shape[0]),
         "model_meta": meta,
         "multimodal_meta": mm_meta,

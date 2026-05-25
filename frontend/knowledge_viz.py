@@ -9,7 +9,6 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from backend.config import DB_PATH, PROCESSED_DIR
-from backend.knowledge.comprehensive_graph import subgraph_for_symbol
 from backend.knowledge.graph_store import GRAPH_PATH, LogicGraphStore
 from backend.knowledge.vector_rag import VECTOR_PATH, VectorLogicRAG
 from backend.llm.analyst import llm_status
@@ -198,7 +197,8 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
     rag = VectorLogicRAG()
     c4.metric("Vector docs", len(rag._fallback))
 
-    sym = (symbol or st.text_input("Focus symbol", value=symbol or "BUNGAL", key="kg_sym")).strip().upper()
+    default_sym = (symbol or "").strip().upper()
+    sym = (symbol or st.text_input("Focus symbol", value=default_sym or "NGPL", key="kg_sym")).strip().upper()
     depth = st.slider("Graph depth (hops from symbol)", 1, 3, 2)
     filter_dom = st.multiselect(
         "Show node types",
@@ -215,7 +215,10 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
 
         store = DataStore()
         preds, panel, bp, feat = store.load_predictions(), store.load_panel(), store.load_broker_panel(), store.load_features()
-        row_df = enrich_symbol_row(sym, preds, panel, bp, features=feat)
+        from backend.scanner.volume_universe import get_latest_scanner_universe
+
+        universe = get_latest_scanner_universe(preds, panel=panel, broker_panel=bp, top_n=120, features=feat)
+        row_df = enrich_symbol_row(sym, preds, panel, bp, features=feat, universe_df=universe)
         if row_df.empty:
             st.error("No symbol data — run pipeline")
         else:
@@ -225,7 +228,12 @@ def render_knowledge_graph_page(symbol: str | None = None) -> None:
             st.success(f"Graph built: {report.agent_count} agents indexed")
             st.rerun()
 
-    sub = subgraph_for_symbol(sym, depth=depth) if sym else {"nodes": [], "edges": []}
+    if sym:
+        from backend.knowledge.comprehensive_graph import subgraph_for_symbol
+
+        sub = subgraph_for_symbol(sym, depth=depth)
+    else:
+        sub = {"nodes": [], "edges": []}
     st.caption(f"**{sym}** subgraph: {len(sub.get('nodes', []))} nodes · {len(sub.get('edges', []))} edges (depth {depth})")
 
     fig = build_comprehensive_figure(sub, f"{sym} — quant · financial · broker · LLM", filter_kinds=filter_dom or None)

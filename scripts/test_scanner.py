@@ -31,12 +31,15 @@ def main() -> int:
         store = DataStore()
         preds = store.load_predictions()
         panel = store.load_panel()
+        features = store.load_features()
         broker_panel = store.load_broker_panel() if hasattr(store, "load_broker_panel") else store.load_panel("broker_panel")
-        if preds.empty:
+        if preds.empty and features.empty and broker_panel.empty:
             print("WARN: no predictions — run: python scripts/run_pipeline.py")
             return 0
 
-        df = get_latest_scanner_universe(preds, panel=panel, broker_panel=broker_panel, top_n=10)
+        df = get_latest_scanner_universe(
+            preds, panel=panel, broker_panel=broker_panel, top_n=10, features=features
+        )
         if df.empty:
             errors.append("scanner returned empty dataframe")
         else:

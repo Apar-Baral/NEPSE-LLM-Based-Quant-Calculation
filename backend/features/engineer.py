@@ -223,3 +223,82 @@ def _distribution_risk_score(feat: pd.DataFrame) -> pd.Series:
     if long_dist:
         score += (feat[long_dist].fillna(0).max(axis=1) >= 2).astype(float) * 25
     return score.clip(0, 100)
+
+
+def build_broker_proxy_features(broker_panel: pd.DataFrame, report_date: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Minimal floorsheet-style rows from broker desks when symbol_panel is sparse."""
+    if broker_panel.empty or "symbol" not in broker_panel.columns:
+        return pd.DataFrame()
+
+    bp = broker_panel.copy()
+    if "report_date" in bp.columns:
+        bp["report_date"] = pd.to_datetime(bp["report_date"]).dt.normalize()
+        if report_date is not None:
+            rd = pd.Timestamp(report_date).normalize()
+            on_day = bp[bp["report_date"] == rd]
+            if not on_day.empty:
+                bp = on_day
+
+    rows: list[dict] = []
+    for sym, grp in bp.groupby("symbol"):
+        sub = grp[grp["horizon"] == "1D"] if "horizon" in grp.columns else grp
+        if sub.empty:
+            sub = grp
+
+        net = pd.to_numeric(sub.get("net_amount", 0), errors="coerce").fillna(0).sum()
+        buy = pd.to_numeric(sub.get("buy_qty", 0), errors="coerce").fillna(0).sum()
+        sell = pd.to_numeric(sub.get("sell_qty", 0), errors="coerce").fillna(0).sum()
+        activity = buy + sell
+        buy_share = buy / (activity + 1e-9)
+        ltp_vals = pd.to_numeric(sub.get("ltp"), errors="coerce").dropna()
+        rd = sub["report_date"].max() if "report_date" in sub.columns else report_date
+
+        row: dict = {
+            "report_date": rd,
+            "symbol": str(sym).upper(),
+            "ltp": float(ltp_vals.iloc[-1]) if len(ltp_vals) else None,
+            "dist_1D_net_amount": float(net),
+            "dist_1D_float_turnover": float(abs(net)) * 0.01,
+            "dist_1D_power_score": 1 if net >= 0 else 2,
+            "broker_concentration": float(min(buy_share, 1.0)),
+        }
+
+        for h in ("2D", "3D", "4D", "1W", "1M", "3M", "6M", "1Y"):
+            hsub = grp[grp["horizon"] == h] if "horizon" in grp.columns else pd.DataFrame()
+            if hsub.empty:
+                continue
+            hnet = pd.to_numeric(hsub.get("net_amount", 0), errors="coerce").fillna(0).sum()
+            row[f"dist_{h}_net_amount"] = float(hnet)
+            row[f"dist_{h}_float_turnover"] = float(abs(hnet)) * 0.01
+            row[f"dist_{h}_power_score"] = 1 if hnet >= 0 else 2
+
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return _add_composite_features(pd.DataFrame(rows))
+
+
+def expand_features_with_broker(
+    features: pd.DataFrame,
+    broker_panel: pd.DataFrame,
+    report_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Add proxy feature rows for broker symbols missing from panel-based features."""
+    proxy = build_broker_proxy_features(broker_panel, report_date)
+    if proxy.empty:
+        return features
+
+    if features.empty:
+        return proxy
+
+    rd = report_date or features["report_date"].max()
+    panel_syms = set(features["symbol"].astype(str).str.upper())
+    extra = proxy[~proxy["symbol"].astype(str).str.upper().isin(panel_syms)].copy()
+    if extra.empty:
+        return features
+
+    combined = pd.concat([features, extra], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["report_date", "symbol"], keep="first")
+    return _add_composite_features(combined)

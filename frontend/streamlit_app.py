@@ -109,7 +109,17 @@ with st.sidebar:
             result = run_pipeline()
             st.session_state["last_pipeline"] = result
             st.session_state.pop("scanner_df", None)
-            st.success(f"Done: {result.get('symbols', 0)} symbols")
+            n = result.get("symbols", 0)
+            ps = result.get("panel_symbols", 0)
+            bs = result.get("broker_symbols", 0)
+            fs = result.get("feature_symbols", n)
+            st.success(f"Done: **{n}** predictions · **{fs}** feature rows (panel {ps} · broker {bs})")
+            if ps < 5 and bs > ps:
+                st.info(
+                    f"Floorsheet panel has only **{ps}** symbol(s). "
+                    f"Broker proxy expanded features to **{fs}**. "
+                    "Add more CSVs under `Data/Distribution Data/` for richer floorsheet."
+                )
     if st.session_state.get("last_pipeline"):
         lp = st.session_state["last_pipeline"]
         st.caption(f"Last run: {lp.get('trigger_count', 0)} triggers · FS avg {lp.get('floorsheet_score_avg', '—')}")
@@ -184,10 +194,11 @@ if page == "Momentum Scanner":
         st.info("No predictions yet. Click **Run Pipeline** in the sidebar.")
     else:
         try:
-            if st.session_state.get("scanner_df") is not None:
+            df = get_latest_scanner_universe(
+                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+            )
+            if st.session_state.get("scanner_df") is not None and len(st.session_state["scanner_df"]) >= len(df):
                 df = st.session_state["scanner_df"]
-            else:
-                df = get_latest_scanner_universe(preds, panel=panel, broker_panel=broker_panel, top_n=120)
         except ImportError as exc:
             st.error(f"Scanner import error: {exc}")
             st.code(
@@ -260,7 +271,9 @@ if page == "Momentum Scanner":
                 default=default_tiers,
                 help="Neutral = no edge; Invalidated = heavy distribution risk",
             )
-        df = df[df["signal_tier"].isin(tier_filter)]
+        if not tier_filter:
+            tier_filter = tiers_present if tiers_present else list(df["signal_tier"].dropna().unique())
+        df = df[df["signal_tier"].isin(tier_filter)] if tier_filter else df
         if search_q:
             narrowed = filter_universe_by_symbol(df, search_q)
             if not narrowed.empty:
@@ -424,7 +437,13 @@ elif page == "Knowledge Graph":
 
     hero("Knowledge Graph", "Vector DB + logic relationships (MiroFish-style graph)")
     dive_sym = st.session_state.get("dive_select", "")
-    render_knowledge_graph_page(symbol=dive_sym if dive_sym else None)
+    kg_sym = st.text_input(
+        "Graph symbol",
+        value=(dive_sym or "NGPL").strip().upper(),
+        key="kg_focus_sym",
+        help="Only this symbol's nodes are shown (no cross-ticker links).",
+    )
+    render_knowledge_graph_page(symbol=kg_sym)
 
 elif page == "Data & Storage":
     from frontend.knowledge_viz import storage_status
@@ -512,7 +531,7 @@ elif page == "Symbol Deep Dive":
     if preds.empty:
         st.info("Run pipeline first.")
     else:
-        all_syms = all_tracked_symbols(preds, features)
+        all_syms = all_tracked_symbols(preds, features, broker_panel)
         sym_search = st.text_input("Search symbol", placeholder="NGPL, API…", key="dive_search").strip().upper()
         if sym_search and sym_search in all_syms:
             st.session_state["dive_select"] = sym_search
@@ -524,7 +543,9 @@ elif page == "Symbol Deep Dive":
             key="dive_select",
         )
         universe_dive = (
-            get_latest_scanner_universe(preds, panel=panel, broker_panel=broker_panel, top_n=120)
+            get_latest_scanner_universe(
+                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+            )
             if not preds.empty
             else pd.DataFrame()
         )
@@ -661,7 +682,9 @@ elif page == "LLM Briefing":
             st.markdown(test.get("response", ""))
     with c2:
         if st.button("Generate Brief (Top 120 Vol)", disabled=st.session_state.get("brief_generating", False)):
-            universe = get_latest_scanner_universe(preds, panel=panel, broker_panel=broker_panel, top_n=120)
+            universe = get_latest_scanner_universe(
+                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+            )
             start_brief_generation(universe)
             st.rerun()
     poll_brief_job()
@@ -678,7 +701,7 @@ elif page == "LLM Briefing":
 
 elif page == "Chat":
     hero("Quant Chat", "Ask about any symbol — e.g. 'Should I long NGPL?' or 'Compare API vs AKJCL'")
-    all_syms = all_tracked_symbols(preds, features) if not preds.empty else []
+    all_syms = all_tracked_symbols(preds, features, broker_panel) if not preds.empty or not broker_panel.empty else []
     c1, c2 = st.columns([1, 2])
     with c1:
         chat_sym = st.selectbox("Focus symbol (optional)", ["—"] + all_syms, key="chat_sym")
@@ -686,7 +709,9 @@ elif page == "Chat":
         q = st.text_input("Your question", placeholder="e.g. Is SIPD a good early momentum long?")
     if st.button("Send", type="primary") and q:
         universe = (
-            get_latest_scanner_universe(preds, panel=panel, broker_panel=broker_panel, top_n=120)
+            get_latest_scanner_universe(
+                preds, panel=panel, broker_panel=broker_panel, top_n=120, features=features
+            )
             if not preds.empty
             else preds
         )

@@ -16,12 +16,18 @@ from backend.signals.universe_tiers import assign_universe_tiers
 from backend.utils.numeric import coerce_numeric
 
 
-def all_tracked_symbols(predictions: pd.DataFrame, features: pd.DataFrame | None = None) -> list[str]:
+def all_tracked_symbols(
+    predictions: pd.DataFrame,
+    features: pd.DataFrame | None = None,
+    broker_panel: pd.DataFrame | None = None,
+) -> list[str]:
     syms = set()
     if not predictions.empty:
         syms.update(predictions["symbol"].astype(str).str.upper().unique())
     if features is not None and not features.empty:
         syms.update(features["symbol"].astype(str).str.upper().unique())
+    if broker_panel is not None and not broker_panel.empty and "symbol" in broker_panel.columns:
+        syms.update(broker_panel["symbol"].astype(str).str.upper().unique())
     return sorted(syms)
 
 
@@ -61,17 +67,27 @@ def enrich_symbol_row(
     panel: pd.DataFrame,
     broker_panel: pd.DataFrame | None = None,
     features: pd.DataFrame | None = None,
+    universe_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Full scanner + feature metrics for one symbol (even outside top 120)."""
     sym = str(sym).strip().upper()
-    if predictions.empty:
-        return pd.DataFrame()
+    row = pd.DataFrame()
 
-    latest = predictions["report_date"].max()
-    day = predictions[predictions["report_date"] == latest].copy()
-    row = day[day["symbol"].astype(str).str.upper() == sym]
-    if row.empty:
-        row = predictions[predictions["symbol"].astype(str).str.upper() == sym].tail(1)
+    if universe_df is not None and not universe_df.empty:
+        u = universe_df[universe_df["symbol"].astype(str).str.upper() == sym]
+        if not u.empty:
+            row = u.sort_values(
+                "daily_turnover_lac" if "daily_turnover_lac" in u.columns else "report_date",
+                ascending=False,
+            ).tail(1).copy()
+
+    if row.empty and not predictions.empty:
+        latest = predictions["report_date"].max()
+        day = predictions[predictions["report_date"] == latest].copy()
+        row = day[day["symbol"].astype(str).str.upper() == sym]
+        if row.empty:
+            row = predictions[predictions["symbol"].astype(str).str.upper() == sym].tail(1)
+
     if row.empty:
         return pd.DataFrame()
 
