@@ -100,14 +100,10 @@ def _merge_cached_into_df(out: pd.DataFrame, cached_rows: dict, work_symbols: se
 
 
 def apply_cached_llm_scores(universe: pd.DataFrame) -> pd.DataFrame:
-    """Merge LLM scores from disk cache only (fast, no API calls)."""
-    out = universe.copy()
-    for col in ("llm_p_long", "llm_tier", "llm_note"):
-        if col not in out.columns:
-            out[col] = None
-    _, cached_rows, _ = _load_cache_for_universe(out)
-    work_symbols = set(out["symbol"].head(load_yaml_config("settings.yaml").get("scanner", {}).get("llm_score_max", 60)))
-    return _merge_cached_into_df(out, cached_rows, work_symbols)
+    """Merge LLM scores from disk cache only (delegates to llm_cache module)."""
+    from backend.scanner.llm_cache import apply_cached_llm_scores as _apply
+
+    return _apply(universe)
 
 
 def score_universe_with_llm(

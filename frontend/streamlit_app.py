@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Streamlit hot-reload can keep stale backend.scanner modules — drop them on each run
+for _mod in list(sys.modules):
+    if _mod.startswith("backend.scanner.") or _mod == "backend.scanner":
+        del sys.modules[_mod]
+
 
 def _load_scanner_helpers():
     """Load scanner functions without relying on package __init__ (Streamlit-safe)."""
@@ -114,7 +119,7 @@ if page == "Momentum Scanner":
             st.error(f"Scanner import error: {exc}")
             st.code(
                 'cd "E:\\Major Project - Nepse Data LLM"\n'
-                "Remove-Item -Recurse -Force backend\\signals\\__pycache__ -ErrorAction SilentlyContinue\n"
+                "Get-ChildItem -Recurse backend -Filter __pycache__ | Remove-Item -Recurse -Force\n"
                 "python scripts\\test_scanner.py\n"
                 "streamlit run frontend/streamlit_app.py",
                 language="powershell",
